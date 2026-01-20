@@ -332,7 +332,18 @@ function needsCompanion(url) {
     'vimeo.com',
     'dailymotion.com',
     'twitch.tv',
-    'reddit.com'
+    'reddit.com', 'v.redd.it',
+    'streamable.com',
+    'gfycat.com',
+    'imgur.com',
+    'bilibili.com',
+    'nicovideo.jp',
+    'soundcloud.com',
+    'mixcloud.com',
+    'bandcamp.com',
+    'pornhub.com',
+    'xvideos.com',
+    'xhamster.com'
   ];
   
   const lowerUrl = url.toLowerCase();
@@ -345,15 +356,18 @@ function addVideo(tabId, videoInfo) {
   const videos = detectedVideos.get(tabId);
   
   if (!videos.has(videoInfo.url)) {
+    // Use needsCompanion from videoInfo if set, otherwise check URL
+    const requiresCompanion = videoInfo.needsCompanion !== undefined ? videoInfo.needsCompanion : needsCompanion(videoInfo.url);
+    
     videos.set(videoInfo.url, {
       ...videoInfo,
       id: Date.now() + '_' + Math.random().toString(36).substr(2, 9),
       timestamp: new Date().toISOString(),
-      needsCompanion: needsCompanion(videoInfo.url)
+      needsCompanion: requiresCompanion
     });
     
     updateBadge(tabId);
-    console.log('[Video Downloader] Detected:', videoInfo.title || videoInfo.url);
+    console.log('[Video Downloader] Detected:', videoInfo.title || videoInfo.url, 'needsCompanion:', requiresCompanion);
   }
 }
 
@@ -421,18 +435,35 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case 'VIDEO_DETECTED':
       const video = message.video;
-      const isYouTube = video.isYouTube || video.type === 'youtube/protected';
+      // Check if this video needs companion app (page URLs, embeds, or known sites)
+      const videoNeedsCompanion = video.needsCompanion || 
+                                   video.type?.includes('/page') || 
+                                   video.type?.includes('/embed') || 
+                                   video.type === 'video/page' ||
+                                   needsCompanion(video.src);
+      
+      // Extract site name from URL if not provided
+      let siteName = video.siteName || '';
+      if (!siteName && video.src) {
+        try {
+          const urlHost = new URL(video.src).hostname;
+          siteName = urlHost.replace('www.', '').split('.')[0];
+          siteName = siteName.charAt(0).toUpperCase() + siteName.slice(1);
+        } catch (e) {}
+      }
       
       addVideo(tabId, {
         url: video.src,
         filename: extractFilename(video.src, video.title),
         contentType: video.type || 'video/mp4',
         size: 0,
-        quality: estimateQuality(video.src, video.quality),
+        quality: video.quality || estimateQuality(video.src),
         source: 'dom',
         poster: video.poster,
         title: video.title || '',
-        isYouTube: isYouTube
+        isYouTube: video.type?.includes('youtube'),
+        needsCompanion: videoNeedsCompanion,
+        siteName: siteName
       });
       break;
       
@@ -480,11 +511,13 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function downloadVideo(video, quality = 'best') {
   console.log('[Video Downloader] Download requested:', video.url, quality);
   console.log('[Video Downloader] Companion ready:', companionReady);
-  console.log('[Video Downloader] Video needs companion:', video.needsCompanion, video.isYouTube);
+  console.log('[Video Downloader] Video needs companion:', video.needsCompanion);
+  
+  const videoNeedsCompanion = video.needsCompanion || video.isYouTube || needsCompanion(video.url);
   
   // Use companion app if available and video needs it
-  if (companionReady && nativePort && (video.needsCompanion || video.isYouTube || needsCompanion(video.url))) {
-    console.log('[Video Downloader] Using companion app');
+  if (companionReady && nativePort && videoNeedsCompanion) {
+    console.log('[Video Downloader] Using companion app for:', video.url);
     
     // Set current download state
     currentDownload = {
@@ -510,11 +543,12 @@ function downloadVideo(video, quality = 'best') {
         }
       }, 100);
       
+      const siteName = video.siteName || 'video';
       browser.notifications.create({
         type: 'basic',
         iconUrl: browser.runtime.getURL('icons/icon-48.svg'),
         title: 'Download Started',
-        message: 'Downloading via companion app...'
+        message: `Downloading ${siteName}...`
       });
       
       return;
@@ -525,14 +559,9 @@ function downloadVideo(video, quality = 'best') {
     }
   }
   
-  // Try direct browser download for any video
-  const filename = video.filename || extractFilename(video.url, video.title);
-  
-  // For YouTube watch URLs, we can't download directly - need companion
-  if (video.url.includes('youtube.com/watch') || video.url.includes('youtu.be/')) {
+  // For sites that need companion but it's not connected
+  if (videoNeedsCompanion && !companionReady) {
     // Copy yt-dlp command as fallback
-    const ytdlpCmd = `yt-dlp -f "bestvideo[height<=${quality === 'best' ? '2160' : quality.replace('p', '')}]+bestaudio/best" "${video.url}"`;
-    
     browser.tabs.query({ active: true, currentWindow: true }).then(tabs => {
       if (tabs[0]) {
         browser.tabs.sendMessage(tabs[0].id, {
@@ -553,6 +582,7 @@ function downloadVideo(video, quality = 'best') {
   }
   
   // Try browser download for direct URLs
+  const filename = video.filename || extractFilename(video.url, video.title);
   console.log('[Video Downloader] Attempting browser download:', filename);
   
   browser.downloads.download({

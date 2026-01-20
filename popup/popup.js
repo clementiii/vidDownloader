@@ -66,8 +66,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   function createVideoItem(video) {
     const li = document.createElement('li');
     li.className = 'video-item';
-    if (video.isYouTube || video.needsCompanion) {
-      li.classList.add('youtube-video');
+    if (video.needsCompanion || video.isYouTube) {
+      li.classList.add('companion-video');
     }
     li.dataset.url = video.url;
     
@@ -84,9 +84,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sizeDisplay = size ? `<span class="video-size">${size}</span>` : '';
     
     // Show badge for videos that need companion
-    const companionBadge = (video.isYouTube || video.needsCompanion)
-      ? `<span class="video-youtube">📺 HD Ready</span>` 
-      : '';
+    let companionBadge = '';
+    if (video.needsCompanion || video.isYouTube) {
+      let siteName = video.siteName || (video.isYouTube ? 'YouTube' : '');
+      if (!siteName) {
+        // Try to extract from URL
+        try {
+          const urlHost = new URL(video.url).hostname;
+          siteName = urlHost.replace('www.', '').split('.')[0];
+          siteName = siteName.charAt(0).toUpperCase() + siteName.slice(1);
+        } catch (e) {
+          siteName = 'Video';
+        }
+      }
+      companionBadge = `<span class="video-youtube">📺 ${escapeHtml(siteName)}</span>`;
+    }
     
     // Use title if available, otherwise filename
     const displayName = video.title || video.filename;

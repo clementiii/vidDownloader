@@ -263,20 +263,22 @@ body {
   margin-bottom: 0;
 }
 
-.video-item.youtube-video {
-  border-color: #ff0000;
-  background: rgba(255, 0, 0, 0.08);
+.video-item.youtube-video,
+.video-item.companion-video {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
 }
 
-.video-item.youtube-video:hover {
-  border-color: #ff0000;
-  background: rgba(255, 0, 0, 0.15);
+.video-item.youtube-video:hover,
+.video-item.companion-video:hover {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.15);
 }
 
 .video-youtube {
   font-size: 11px;
   padding: 4px 8px;
-  background: #ff0000;
+  background: var(--accent);
   color: white;
   border-radius: 5px;
   font-weight: 600;
