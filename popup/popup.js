@@ -1,6 +1,7 @@
 // Video Downloader - Popup Script
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // Video tab elements
   const videoList = document.getElementById('videoList');
   const loading = document.getElementById('loading');
   const noVideos = document.getElementById('noVideos');
@@ -14,9 +15,69 @@ document.addEventListener('DOMContentLoaded', async () => {
   const qualityLoading = document.getElementById('qualityLoading');
   const modalVideoTitle = document.getElementById('modalVideoTitle');
   
+  // Tab elements
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const tabContents = document.querySelectorAll('.tab-content');
+  const videosTabCount = document.getElementById('videosTabCount');
+  const downloadsTabCount = document.getElementById('downloadsTabCount');
+  
+  // Downloads tab elements
+  const downloadsList = document.getElementById('downloadsList');
+  const noDownloads = document.getElementById('noDownloads');
+  
+  // Pin tooltip elements
+  const pinHint = document.getElementById('pinHint');
+  const pinTooltip = document.getElementById('pinTooltip');
+  const closePinTooltip = document.getElementById('closePinTooltip');
+  
   let currentTabId = null;
   let companionReady = false;
   let selectedVideo = null;
+  let activeDownloads = new Map(); // Track all downloads
+  
+  // Tab switching
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tabName = btn.dataset.tab;
+      
+      // Update button states
+      tabBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      
+      // Update content visibility
+      tabContents.forEach(content => {
+        content.classList.remove('active');
+        if (content.id === `${tabName}Tab`) {
+          content.classList.add('active');
+        }
+      });
+      
+      // Update footer text based on tab
+      if (tabName === 'downloads') {
+        videoCount.textContent = `${activeDownloads.size} active download${activeDownloads.size !== 1 ? 's' : ''}`;
+      } else {
+        loadVideos();
+      }
+    });
+  });
+  
+  // Pin tooltip
+  pinHint.addEventListener('click', () => {
+    pinTooltip.classList.toggle('hidden');
+  });
+  
+  closePinTooltip.addEventListener('click', () => {
+    pinTooltip.classList.add('hidden');
+    // Remember that user saw the tooltip
+    browser.storage.local.set({ pinTooltipSeen: true });
+  });
+  
+  // Check if we should show pin tooltip
+  const { pinTooltipSeen } = await browser.storage.local.get('pinTooltipSeen');
+  if (!pinTooltipSeen) {
+    // Show hint icon with a pulse animation
+    pinHint.style.animation = 'pulse 2s infinite';
+  }
   
   // Get current tab
   async function getCurrentTab() {
@@ -62,6 +123,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     return 'sd';
   }
   
+  // Update tab counts
+  function updateTabCounts(videoCount, downloadCount) {
+    videosTabCount.textContent = videoCount || 0;
+    downloadsTabCount.textContent = downloadCount || activeDownloads.size;
+  }
+  
   // Create video item element
   function createVideoItem(video) {
     const li = document.createElement('li');
@@ -88,7 +155,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (video.needsCompanion || video.isYouTube) {
       let siteName = video.siteName || (video.isYouTube ? 'YouTube' : '');
       if (!siteName) {
-        // Try to extract from URL
         try {
           const urlHost = new URL(video.url).hostname;
           siteName = urlHost.replace('www.', '').split('.')[0];
@@ -100,7 +166,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       companionBadge = `<span class="video-youtube">📺 ${escapeHtml(siteName)}</span>`;
     }
     
-    // Use title if available, otherwise filename
     const displayName = video.title || video.filename;
     
     li.innerHTML = `
@@ -119,6 +184,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             <div class="progress-fill"></div>
           </div>
           <div class="progress-text">Starting...</div>
+          <div class="progress-stats">
+            <span class="progress-speed"></span>
+            <span class="progress-remaining"></span>
+            <span class="progress-eta"></span>
+          </div>
         </div>
       </div>
       <button class="copy-btn" title="Copy URL" data-url="${escapeHtml(video.url)}">
@@ -139,12 +209,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Download button click
     const downloadBtn = li.querySelector('.download-btn');
     downloadBtn.addEventListener('click', () => {
-      console.log('[Video Downloader Popup] Download button clicked for:', video.url);
       if (video.isYouTube || video.needsCompanion) {
-        // Show quality selector for YouTube/companion videos
         showQualityModal(video);
       } else {
-        // Direct download
         startDownload(video, 'best', downloadBtn);
       }
     });
@@ -158,18 +225,109 @@ document.addEventListener('DOMContentLoaded', async () => {
     return li;
   }
   
-  // Show quality modal with dynamic options
+  // Create download item for downloads tab
+  function createDownloadItem(download) {
+    const li = document.createElement('li');
+    li.className = 'download-item';
+    li.dataset.url = download.url;
+    
+    const iconClass = download.status === 'complete' ? 'complete' : 
+                      download.status === 'error' ? 'error' : '';
+    
+    const icon = download.status === 'complete' 
+      ? '<polyline points="20 6 9 17 4 12"/>'
+      : download.status === 'error'
+      ? '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'
+      : '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>';
+    
+    const statusClass = download.status === 'complete' ? 'complete' : 
+                        download.status === 'error' ? 'error' : '';
+    
+    let statusText = download.status === 'complete' ? 'Download complete' :
+                     download.status === 'error' ? (download.error || 'Download failed') :
+                     download.statusText || `Downloading... ${Math.round(download.progress)}%`;
+    
+    // Add speed and remaining info to status if available
+    const statsInfo = [];
+    if (download.speed) statsInfo.push(`⚡ ${download.speed}`);
+    if (download.remaining) statsInfo.push(`${download.remaining} left`);
+    if (download.eta) statsInfo.push(`⏱️ ${download.eta}`);
+    const statsText = statsInfo.join(' • ');
+    
+    li.innerHTML = `
+      <div class="download-item-header">
+        <div class="download-icon ${iconClass}">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            ${icon}
+          </svg>
+        </div>
+        <div class="download-details">
+          <div class="download-title" title="${escapeHtml(download.title)}">${escapeHtml(download.title)}</div>
+          <div class="download-status ${statusClass}">${statusText}</div>
+          ${statsText && download.status !== 'complete' && download.status !== 'error' ? `
+            <div class="download-stats">${statsText}</div>
+          ` : ''}
+        </div>
+        ${download.status !== 'complete' && download.status !== 'error' ? `
+          <button class="download-cancel-btn" data-url="${escapeHtml(download.url)}">Cancel</button>
+        ` : ''}
+      </div>
+      ${download.status !== 'complete' && download.status !== 'error' ? `
+        <div class="download-progress">
+          <div class="download-progress-fill" style="width: ${download.progress}%"></div>
+        </div>
+      ` : ''}
+    `;
+    
+    // Cancel button
+    const cancelBtn = li.querySelector('.download-cancel-btn');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', () => {
+        // Remove from active downloads
+        activeDownloads.delete(download.url);
+        renderDownloadsList();
+        // TODO: Actually cancel the download in background
+      });
+    }
+    
+    return li;
+  }
+  
+  // Render downloads list
+  function renderDownloadsList() {
+    if (activeDownloads.size === 0) {
+      noDownloads.classList.remove('hidden');
+      downloadsList.classList.add('hidden');
+    } else {
+      noDownloads.classList.add('hidden');
+      downloadsList.classList.remove('hidden');
+      downloadsList.innerHTML = '';
+      
+      // Sort: active first, then by timestamp
+      const sorted = Array.from(activeDownloads.values()).sort((a, b) => {
+        if (a.status === 'downloading' && b.status !== 'downloading') return -1;
+        if (b.status === 'downloading' && a.status !== 'downloading') return 1;
+        return (b.timestamp || 0) - (a.timestamp || 0);
+      });
+      
+      sorted.forEach(download => {
+        downloadsList.appendChild(createDownloadItem(download));
+      });
+    }
+    
+    updateTabCounts(videosTabCount.textContent, activeDownloads.size);
+  }
+  
+  // Show quality modal
   async function showQualityModal(video) {
     selectedVideo = video;
     modalVideoTitle.textContent = video.title || video.filename || 'Video';
     
-    // Show modal with loading state
     qualityModal.classList.remove('hidden');
     qualityLoading.classList.remove('hidden');
     qualityOptions.classList.add('hidden');
     qualityOptions.innerHTML = '';
     
-    // Fetch available qualities
     let formats = null;
     
     if (companionReady) {
@@ -187,7 +345,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
     
-    // Use default formats if fetch failed
     if (!formats) {
       formats = [
         { quality: 'best', label: 'Best Quality' },
@@ -200,12 +357,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       ];
     }
     
-    // Hide loading, show options
     qualityLoading.classList.add('hidden');
     qualityOptions.classList.remove('hidden');
     
-    // Create quality buttons
-    // Always add "Best Quality" first
+    // Best quality button
     const bestBtn = document.createElement('button');
     bestBtn.className = 'quality-btn best';
     bestBtn.dataset.quality = 'best';
@@ -215,11 +370,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     `;
     qualityOptions.appendChild(bestBtn);
     
-    // Add available formats
-    const qualityOrder = ['2160p', '1440p', '1080p', '720p', '480p', '360p', '240p', '144p'];
     const addedQualities = new Set();
     
-    // First add formats from the response
     formats.forEach(format => {
       const quality = format.quality || format.format_id;
       if (quality === 'best' || addedQualities.has(quality)) return;
@@ -233,7 +385,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       let label = format.label || quality;
       let desc = '';
       
-      // Add HD/SD labels
       const height = parseInt(quality);
       if (height >= 2160) desc = 'Ultra HD';
       else if (height >= 1440) desc = 'Quad HD';
@@ -241,7 +392,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       else if (height >= 720) desc = 'HD';
       else desc = 'SD';
       
-      // Add file size if available
       const sizeText = format.filesize ? formatSize(format.filesize) : '';
       
       btn.innerHTML = `
@@ -253,9 +403,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       qualityOptions.appendChild(btn);
     });
     
-    // If no formats were added from response, add common ones
     if (addedQualities.size === 0) {
-      qualityOrder.slice(0, 6).forEach(quality => {
+      ['2160p', '1440p', '1080p', '720p', '480p', '360p'].forEach(quality => {
         const btn = document.createElement('button');
         btn.className = 'quality-btn';
         btn.dataset.quality = quality;
@@ -280,8 +429,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   // Start download
   function startDownload(video, quality, btn) {
-    console.log('[Video Downloader Popup] Starting download:', video.url, video.title, quality);
-    
     if (btn) {
       btn.classList.add('downloading');
       btn.innerHTML = `
@@ -291,6 +438,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       `;
     }
     
+    // Add to active downloads
+    activeDownloads.set(video.url, {
+      url: video.url,
+      title: video.title || video.filename || 'Video',
+      quality: quality,
+      progress: 0,
+      status: 'downloading',
+      statusText: 'Starting...',
+      timestamp: Date.now()
+    });
+    renderDownloadsList();
+    updateTabCounts(videosTabCount.textContent, activeDownloads.size);
+    
     browser.runtime.sendMessage({
       type: 'DOWNLOAD_VIDEO',
       video: video,
@@ -298,13 +458,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       tabId: currentTabId
     });
     
-    // Show progress
     const progressEl = document.getElementById(`progress-${video.id}`);
     if (progressEl) {
       progressEl.classList.add('active');
     }
     
-    // Close modal
     qualityModal.classList.add('hidden');
   }
   
@@ -374,12 +532,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         videoList.classList.remove('hidden');
         videoCount.textContent = `${videos.length} video${videos.length !== 1 ? 's' : ''} found`;
         
-        // Restore download state if there's an active download
         const downloadState = response.downloadState;
         if (downloadState && downloadState.active) {
           restoreDownloadState(downloadState);
         }
       }
+      
+      updateTabCounts(videos.length, activeDownloads.size);
     } catch (error) {
       console.error('Error loading videos:', error);
       loading.classList.add('hidden');
@@ -388,11 +547,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
   
-  // Restore download state from background
+  // Restore download state
   function restoreDownloadState(state) {
     if (!state.videoUrl) return;
     
-    // Find the video item by URL
+    // Add to active downloads if not already there
+    if (!activeDownloads.has(state.videoUrl)) {
+      activeDownloads.set(state.videoUrl, {
+        url: state.videoUrl,
+        title: 'Downloading...',
+        progress: state.progress || 0,
+        status: state.status || 'downloading',
+        timestamp: Date.now()
+      });
+      renderDownloadsList();
+    }
+    
     const videoItem = document.querySelector(`[data-url="${CSS.escape(state.videoUrl)}"]`);
     if (!videoItem) return;
     
@@ -462,11 +632,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const btn = e.target.closest('.quality-btn');
     if (btn && selectedVideo) {
       const quality = btn.dataset.quality;
-      
-      // Find the download button for this video
       const videoItem = document.querySelector(`[data-url="${CSS.escape(selectedVideo.url)}"]`);
       const downloadBtn = videoItem?.querySelector('.download-btn');
-      
       startDownload(selectedVideo, quality, downloadBtn);
       selectedVideo = null;
     }
@@ -487,13 +654,46 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Listen for download progress
   browser.runtime.onMessage.addListener((message) => {
     if (message.type === 'DOWNLOAD_PROGRESS') {
-      // Find the specific video item if we have the URL
+      // Update active downloads
+      if (message.videoUrl && activeDownloads.has(message.videoUrl)) {
+        const download = activeDownloads.get(message.videoUrl);
+        download.progress = message.progress;
+        download.status = message.status === 'error' ? 'error' : 'downloading';
+        download.error = message.error;
+        download.speed = message.speed;
+        download.remaining = message.remaining;
+        download.totalSize = message.totalSize;
+        download.eta = message.eta;
+        
+        switch (message.status) {
+          case 'starting':
+            download.statusText = 'Starting download...';
+            break;
+          case 'extracting':
+            download.statusText = 'Extracting video info...';
+            break;
+          case 'extracting playlist':
+            download.statusText = 'Processing stream playlist...';
+            break;
+          case 'merging':
+            download.statusText = 'Merging video and audio...';
+            break;
+          case 'error':
+            download.statusText = message.error || 'Download error';
+            break;
+          default:
+            download.statusText = `Downloading... ${Math.round(message.progress)}%`;
+        }
+        
+        renderDownloadsList();
+      }
+      
+      // Update video tab progress
       let targetItem = null;
       if (message.videoUrl) {
         targetItem = document.querySelector(`[data-url="${CSS.escape(message.videoUrl)}"]`);
       }
       
-      // Update progress for the target item (or all active ones as fallback)
       const containers = targetItem 
         ? [targetItem.querySelector('.progress-container')]
         : document.querySelectorAll('.progress-container.active');
@@ -503,25 +703,75 @@ document.addEventListener('DOMContentLoaded', async () => {
         el.classList.add('active');
         const fill = el.querySelector('.progress-fill');
         const text = el.querySelector('.progress-text');
+        const speedEl = el.querySelector('.progress-speed');
+        const remainingEl = el.querySelector('.progress-remaining');
+        const etaEl = el.querySelector('.progress-eta');
+        
         if (fill) fill.style.width = `${message.progress}%`;
         if (text) {
-          if (message.status === 'merging') {
-            text.textContent = 'Merging video and audio...';
-          } else {
-            text.textContent = `Downloading... ${Math.round(message.progress)}%`;
+          switch (message.status) {
+            case 'starting':
+              text.textContent = 'Starting download...';
+              break;
+            case 'extracting':
+              text.textContent = 'Extracting video info...';
+              break;
+            case 'extracting playlist':
+              text.textContent = 'Processing stream playlist...';
+              break;
+            case 'merging':
+              text.textContent = 'Merging video and audio...';
+              break;
+            case 'error':
+              text.textContent = message.error || 'Download error';
+              text.style.color = '#e53935';
+              break;
+            default:
+              text.textContent = `Downloading... ${Math.round(message.progress)}%`;
           }
+        }
+        
+        // Update speed, remaining, and ETA
+        if (speedEl) {
+          speedEl.textContent = message.speed ? `⚡ ${message.speed}` : '';
+        }
+        if (remainingEl) {
+          if (message.remaining && message.totalSize) {
+            remainingEl.textContent = `${message.remaining} left of ${message.totalSize}`;
+          } else {
+            remainingEl.textContent = '';
+          }
+        }
+        if (etaEl) {
+          etaEl.textContent = message.eta ? `⏱️ ${message.eta}` : '';
         }
       });
     }
     
     if (message.type === 'DOWNLOAD_COMPLETE') {
-      // Find the specific video item if we have the URL
+      // Update active downloads
+      if (message.videoUrl && activeDownloads.has(message.videoUrl)) {
+        const download = activeDownloads.get(message.videoUrl);
+        download.status = message.success ? 'complete' : 'error';
+        download.progress = message.success ? 100 : download.progress;
+        download.error = message.error;
+        renderDownloadsList();
+        
+        // Remove completed downloads after a delay
+        if (message.success) {
+          setTimeout(() => {
+            activeDownloads.delete(message.videoUrl);
+            renderDownloadsList();
+          }, 5000);
+        }
+      }
+      
+      // Update video tab
       let targetItem = null;
       if (message.videoUrl) {
         targetItem = document.querySelector(`[data-url="${CSS.escape(message.videoUrl)}"]`);
       }
       
-      // Reset download buttons
       const buttons = targetItem
         ? [targetItem.querySelector('.download-btn')]
         : document.querySelectorAll('.download-btn.downloading');
@@ -549,7 +799,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }, 2000);
       });
       
-      // Hide progress bars
       const progressContainers = targetItem
         ? [targetItem.querySelector('.progress-container')]
         : document.querySelectorAll('.progress-container.active');
@@ -571,4 +820,5 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   // Initial load
   loadVideos();
+  renderDownloadsList();
 });

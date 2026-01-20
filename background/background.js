@@ -14,17 +14,27 @@ let currentDownload = {
   status: 'idle' // idle, downloading, merging, complete, error
 };
 
-// Video file extensions and MIME types
+// Video file extensions and MIME types (only direct downloadable formats)
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.m4v', '.3gp', '.ogv'];
 const VIDEO_MIME_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo', 'video/x-flv', 'video/x-matroska'];
 
-// Streaming patterns (HLS, DASH)
-const STREAMING_PATTERNS = ['.m3u8', '.mpd'];
+// Streaming patterns to IGNORE - these are playlists/segments that need yt-dlp, not direct download
+const STREAMING_IGNORE_PATTERNS = [
+  '.m3u8', '.mpd',           // Streaming manifests
+  '.ts?', '/ts?', '/ts/',    // HLS segments
+  '/chunk', '/frag',          // Video chunks
+  '/segment', '/seg',         // Segments  
+  'playlist.m3u8', 'master.m3u8', 'index.m3u8', 'video.m3u8',
+  '/hls/', '/dash/',
+  'googlevideo.com/videoplayback'  // YouTube adaptive streams
+];
 
 // URLs to ignore (streaming chunks, tracking, etc.)
 const IGNORE_PATTERNS = [
   '/sq/',                            // YouTube sq segments
   'initializeMetadata',
+  '/manifest/', '/playlist/',
+  'googlevideo.com'                   // YouTube CDN
 ];
 
 // Connect to companion app
@@ -50,12 +60,21 @@ function connectToCompanion() {
         // Update download state
         currentDownload.progress = message.progress;
         currentDownload.status = message.status || 'downloading';
+        currentDownload.speed = message.speed;
+        currentDownload.remaining = message.remaining;
+        currentDownload.eta = message.eta;
+        currentDownload.totalSize = message.totalSize;
         
         // Broadcast progress to popup
         browser.runtime.sendMessage({
           type: 'DOWNLOAD_PROGRESS',
           progress: message.progress,
           status: message.status,
+          speed: message.speed,
+          remaining: message.remaining,
+          downloaded: message.downloaded,
+          totalSize: message.totalSize,
+          eta: message.eta,
           videoId: currentDownload.videoId,
           videoUrl: currentDownload.videoUrl
         }).catch(() => {});
@@ -230,32 +249,43 @@ function shouldIgnoreUrl(url) {
   return IGNORE_PATTERNS.some(pattern => lowerUrl.includes(pattern));
 }
 
-// Check if URL is a video
+// Check if URL should be ignored (streaming/HLS/DASH)
+function isStreamingUrl(url) {
+  const lowerUrl = url.toLowerCase();
+  return STREAMING_IGNORE_PATTERNS.some(pattern => lowerUrl.includes(pattern));
+}
+
+// Check if URL is a directly downloadable video
 function isVideoUrl(url) {
   const lowerUrl = url.toLowerCase();
   
-  // Check extensions
+  // First, exclude streaming patterns
+  if (isStreamingUrl(lowerUrl)) return false;
+  
+  // Check extensions (only direct video files)
   for (const ext of VIDEO_EXTENSIONS) {
     const extPattern = new RegExp(`\\${ext}(\\?|$)`, 'i');
     if (extPattern.test(lowerUrl)) return true;
   }
   
-  // Check streaming patterns
-  for (const pattern of STREAMING_PATTERNS) {
-    if (lowerUrl.includes(pattern)) return true;
-  }
-  
   return false;
 }
 
-// Check if content type is video
+// Check if content type is a directly downloadable video (exclude streaming)
 function isVideoContentType(contentType) {
   if (!contentType) return false;
   const lowerType = contentType.toLowerCase();
+  
+  // EXCLUDE streaming types - these need yt-dlp, not direct download
+  if (lowerType.includes('mpegurl') || 
+      lowerType.includes('dash+xml') || 
+      lowerType.includes('mp2t') ||
+      lowerType.includes('vnd.apple.mpegurl')) {
+    return false;
+  }
+  
   return VIDEO_MIME_TYPES.some(type => lowerType.includes(type)) || 
-         lowerType.includes('video/') ||
-         lowerType.includes('application/x-mpegurl') ||
-         lowerType.includes('application/dash+xml');
+         lowerType.includes('video/');
 }
 
 // Extract filename from URL or title
@@ -395,6 +425,9 @@ browser.webRequest.onHeadersReceived.addListener(
     if (tabId < 0) return;
     if (shouldIgnoreUrl(url)) return;
     
+    // Skip streaming URLs (HLS/DASH) - they need yt-dlp, not direct download
+    if (isStreamingUrl(url)) return;
+    
     let contentType = '';
     let contentLength = 0;
     
@@ -408,8 +441,10 @@ browser.webRequest.onHeadersReceived.addListener(
       }
     }
     
+    // Only detect direct downloadable videos, not streaming
     if (isVideoContentType(contentType) || isVideoUrl(url)) {
-      const minSize = 100000;
+      // Require minimum size to avoid tracking pixels and small chunks
+      const minSize = 500000; // 500KB minimum
       if (contentLength > 0 && contentLength < minSize) {
         return;
       }
@@ -463,7 +498,8 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         title: video.title || '',
         isYouTube: video.type?.includes('youtube'),
         needsCompanion: videoNeedsCompanion,
-        siteName: siteName
+        siteName: siteName,
+        pageUrl: video.pageUrl || video.src  // Keep original page URL for referer
       });
       break;
       
@@ -533,7 +569,8 @@ function downloadVideo(video, quality = 'best') {
       nativePort.postMessage({
         action: 'download',
         url: video.url,
-        quality: quality
+        quality: quality,
+        pageUrl: video.pageUrl || video.url  // Original page URL for referer
       });
       
       // Send a ping immediately after to flush the message buffer

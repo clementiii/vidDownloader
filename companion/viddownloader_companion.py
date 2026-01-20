@@ -141,7 +141,7 @@ def get_format_list(formats):
     result.sort(key=lambda x: int(x['quality'].replace('p', '')), reverse=True)
     return result[:6]
 
-def download_video(url, quality='best', output_folder=None):
+def download_video(url, quality='best', output_folder=None, page_url=None):
     """Download video using yt-dlp"""
     logging.info(f"Starting download: {url} at {quality}")
     
@@ -150,25 +150,59 @@ def download_video(url, quality='best', output_folder=None):
     
     output_template = os.path.join(output_folder, '%(title)s.%(ext)s')
     
+    # Check if this is an m3u8 URL (direct HLS stream)
+    is_m3u8 = '.m3u8' in url.lower()
+    
+    # Determine if this is a site that needs special handling
+    needs_special = any(site in url.lower() for site in ['missav', 'jable', 'javhd', 'spankbang'])
+    
     cmd = [
         'yt-dlp',
         '--no-playlist',
         '--newline',
         '--progress',
+        '--no-check-certificates',
+        '--socket-timeout', '30',
         '-o', output_template
     ]
     
+    # Add referer for all HLS streams and special sites
+    referer = page_url or url
+    if needs_special or is_m3u8:
+        cmd.extend(['--referer', referer])
+        # Also add origin and user-agent headers
+        origin = '/'.join(referer.split('/')[:3])
+        cmd.extend(['--add-header', f'Origin:{origin}'])
+        cmd.extend(['--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'])
+    
+    # For m3u8 streams, use specific options
+    if is_m3u8:
+        cmd.extend([
+            '--hls-prefer-native',  # Use native HLS downloader
+        ])
+    
+    # Format selection
     if quality == 'best':
-        cmd.extend(['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'])
+        cmd.extend(['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'])
     elif quality == 'worst':
         cmd.extend(['-f', 'worstvideo+worstaudio/worst'])
     else:
         height = quality.replace('p', '')
-        cmd.extend(['-f', f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}][ext=mp4]/best'])
+        cmd.extend(['-f', f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={height}]+bestaudio/best[height<={height}][ext=mp4]/best[height<={height}]/best'])
+    
+    # Merge to mp4
+    cmd.extend(['--merge-output-format', 'mp4'])
     
     cmd.append(url)
     
     logging.info(f"Running command: {' '.join(cmd)}")
+    
+    # Send immediate progress to show download started
+    send_message({
+        'type': 'progress',
+        'progress': 0,
+        'status': 'starting'
+    })
     
     try:
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
@@ -181,20 +215,80 @@ def download_video(url, quality='best', output_folder=None):
         )
         
         filename = None
+        last_progress = 0
+        last_error = None
         
         for line in process.stdout:
             line = line.strip()
             logging.debug(f"yt-dlp output: {line}")
             
-            if '[download]' in line:
+            # Extracting info (for HLS streams)
+            if '[info]' in line or 'Extracting URL' in line:
+                send_message({
+                    'type': 'progress',
+                    'progress': 1,
+                    'status': 'extracting'
+                })
+            
+            # HLS manifest extraction
+            elif 'Downloading m3u8' in line or 'Downloading MPD' in line:
+                send_message({
+                    'type': 'progress',
+                    'progress': 2,
+                    'status': 'extracting playlist'
+                })
+            
+            elif '[download]' in line:
+                # Parse progress, size, speed, and ETA from yt-dlp output
+                # Example: [download]  45.2% of 150.00MiB at 2.50MiB/s ETA 00:45
                 match = re.search(r'(\d+\.?\d*)%', line)
                 if match:
                     progress = float(match.group(1))
-                    send_message({
-                        'type': 'progress',
-                        'progress': progress,
-                        'status': 'downloading'
-                    })
+                    
+                    # Extract total size (e.g., "150.00MiB" or "1.20GiB")
+                    size_match = re.search(r'of\s+([\d.]+)([KMG]i?B)', line)
+                    total_size = None
+                    if size_match:
+                        size_num = float(size_match.group(1))
+                        size_unit = size_match.group(2)
+                        total_size = f"{size_num:.1f} {size_unit}"
+                    
+                    # Extract download speed (e.g., "2.50MiB/s")
+                    speed_match = re.search(r'at\s+([\d.]+)([KMG]i?B)/s', line)
+                    speed = None
+                    if speed_match:
+                        speed_num = float(speed_match.group(1))
+                        speed_unit = speed_match.group(2)
+                        speed = f"{speed_num:.1f} {speed_unit}/s"
+                    
+                    # Extract ETA (e.g., "00:45" or "01:23:45")
+                    eta_match = re.search(r'ETA\s+(\d+:\d+(?::\d+)?)', line)
+                    eta = eta_match.group(1) if eta_match else None
+                    
+                    # Calculate downloaded and remaining size
+                    downloaded = None
+                    remaining = None
+                    if size_match:
+                        size_bytes = float(size_match.group(1))
+                        unit = size_match.group(2)
+                        downloaded_bytes = size_bytes * (progress / 100)
+                        remaining_bytes = size_bytes - downloaded_bytes
+                        downloaded = f"{downloaded_bytes:.1f} {unit}"
+                        remaining = f"{remaining_bytes:.1f} {unit}"
+                    
+                    # Only send if progress changed significantly
+                    if progress - last_progress >= 0.5 or progress >= 100:
+                        last_progress = progress
+                        send_message({
+                            'type': 'progress',
+                            'progress': progress,
+                            'status': 'downloading',
+                            'speed': speed,
+                            'totalSize': total_size,
+                            'downloaded': downloaded,
+                            'remaining': remaining,
+                            'eta': eta
+                        })
                 
                 if 'Destination:' in line:
                     filename = line.split('Destination:')[-1].strip()
@@ -206,6 +300,32 @@ def download_video(url, quality='best', output_folder=None):
                     'type': 'progress',
                     'progress': 99,
                     'status': 'merging'
+                })
+            
+            elif '[hlsnative]' in line or 'Downloading fragment' in line:
+                # HLS fragment download
+                frag_match = re.search(r'fragment\s+(\d+)/(\d+)', line, re.IGNORECASE)
+                if frag_match:
+                    frag_num = int(frag_match.group(1))
+                    frag_total = int(frag_match.group(2))
+                    progress = (frag_num / frag_total) * 100
+                    if progress - last_progress >= 2:
+                        last_progress = progress
+                        send_message({
+                            'type': 'progress',
+                            'progress': progress,
+                            'status': 'downloading'
+                        })
+            
+            elif 'ERROR:' in line:
+                # Capture error message
+                last_error = line.replace('ERROR:', '').strip()
+                logging.error(f"yt-dlp error: {last_error}")
+                send_message({
+                    'type': 'progress',
+                    'progress': 0,
+                    'status': 'error',
+                    'error': last_error
                 })
         
         process.wait()
@@ -220,10 +340,11 @@ def download_video(url, quality='best', output_folder=None):
                 'folder': output_folder
             })
         else:
+            error_msg = last_error if last_error else 'Download failed - site may not be supported'
             send_message({
                 'type': 'complete',
                 'success': False,
-                'error': 'Download failed'
+                'error': error_msg
             })
             
     except Exception as e:
@@ -279,13 +400,14 @@ def main():
             url = message.get('url')
             quality = message.get('quality', 'best')
             folder = message.get('folder', DOWNLOADS_FOLDER)
+            page_url = message.get('pageUrl')  # Original page URL for referer
             
-            logging.info(f"Download request: {url} at {quality}")
+            logging.info(f"Download request: {url} at {quality}, page: {page_url}")
             
             # Run download in thread to not block message receiving
             thread = threading.Thread(
                 target=download_video,
-                args=(url, quality, folder),
+                args=(url, quality, folder, page_url),
                 daemon=True
             )
             thread.start()
