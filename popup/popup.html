@@ -63,17 +63,18 @@
   <div id="qualityModal" class="modal hidden">
     <div class="modal-content">
       <div class="modal-header">
-        <h3>Select Quality</h3>
+        <div class="modal-title-section">
+          <h3>Select Quality</h3>
+          <p id="modalVideoTitle" class="modal-subtitle"></p>
+        </div>
         <button class="modal-close" id="closeModal">&times;</button>
       </div>
       <div class="modal-body">
-        <div id="qualityOptions" class="quality-options">
-          <button class="quality-btn" data-quality="best">Best Quality</button>
-          <button class="quality-btn" data-quality="1080p">1080p HD</button>
-          <button class="quality-btn" data-quality="720p">720p HD</button>
-          <button class="quality-btn" data-quality="480p">480p</button>
-          <button class="quality-btn" data-quality="360p">360p</button>
+        <div id="qualityLoading" class="quality-loading">
+          <div class="spinner small"></div>
+          <span>Fetching available qualities...</span>
         </div>
+        <div id="qualityOptions" class="quality-options hidden"></div>
       </div>
     </div>
   </div>

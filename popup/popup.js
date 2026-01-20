@@ -11,6 +11,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const qualityModal = document.getElementById('qualityModal');
   const closeModal = document.getElementById('closeModal');
   const qualityOptions = document.getElementById('qualityOptions');
+  const qualityLoading = document.getElementById('qualityLoading');
+  const modalVideoTitle = document.getElementById('modalVideoTitle');
   
   let currentTabId = null;
   let companionReady = false;
@@ -128,8 +130,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       console.log('[Video Downloader Popup] Download button clicked for:', video.url);
       if (video.isYouTube || video.needsCompanion) {
         // Show quality selector for YouTube/companion videos
-        selectedVideo = video;
-        qualityModal.classList.remove('hidden');
+        showQualityModal(video);
       } else {
         // Direct download
         startDownload(video, 'best', downloadBtn);
@@ -143,6 +144,126 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     
     return li;
+  }
+  
+  // Show quality modal with dynamic options
+  async function showQualityModal(video) {
+    selectedVideo = video;
+    modalVideoTitle.textContent = video.title || video.filename || 'Video';
+    
+    // Show modal with loading state
+    qualityModal.classList.remove('hidden');
+    qualityLoading.classList.remove('hidden');
+    qualityOptions.classList.add('hidden');
+    qualityOptions.innerHTML = '';
+    
+    // Fetch available qualities
+    let formats = null;
+    
+    if (companionReady) {
+      try {
+        const response = await browser.runtime.sendMessage({
+          type: 'GET_VIDEO_INFO',
+          url: video.url
+        });
+        
+        if (response && response.formats && response.formats.length > 0) {
+          formats = response.formats;
+        }
+      } catch (e) {
+        console.error('Error fetching video info:', e);
+      }
+    }
+    
+    // Use default formats if fetch failed
+    if (!formats) {
+      formats = [
+        { quality: 'best', label: 'Best Quality' },
+        { quality: '2160p', label: '4K (2160p)' },
+        { quality: '1440p', label: '1440p' },
+        { quality: '1080p', label: '1080p' },
+        { quality: '720p', label: '720p' },
+        { quality: '480p', label: '480p' },
+        { quality: '360p', label: '360p' }
+      ];
+    }
+    
+    // Hide loading, show options
+    qualityLoading.classList.add('hidden');
+    qualityOptions.classList.remove('hidden');
+    
+    // Create quality buttons
+    // Always add "Best Quality" first
+    const bestBtn = document.createElement('button');
+    bestBtn.className = 'quality-btn best';
+    bestBtn.dataset.quality = 'best';
+    bestBtn.innerHTML = `
+      <span class="quality-label">⭐ Best Quality</span>
+      <span class="quality-desc">Highest available resolution</span>
+    `;
+    qualityOptions.appendChild(bestBtn);
+    
+    // Add available formats
+    const qualityOrder = ['2160p', '1440p', '1080p', '720p', '480p', '360p', '240p', '144p'];
+    const addedQualities = new Set();
+    
+    // First add formats from the response
+    formats.forEach(format => {
+      const quality = format.quality || format.format_id;
+      if (quality === 'best' || addedQualities.has(quality)) return;
+      
+      addedQualities.add(quality);
+      
+      const btn = document.createElement('button');
+      btn.className = 'quality-btn';
+      btn.dataset.quality = quality;
+      
+      let label = format.label || quality;
+      let desc = '';
+      
+      // Add HD/SD labels
+      const height = parseInt(quality);
+      if (height >= 2160) desc = 'Ultra HD';
+      else if (height >= 1440) desc = 'Quad HD';
+      else if (height >= 1080) desc = 'Full HD';
+      else if (height >= 720) desc = 'HD';
+      else desc = 'SD';
+      
+      // Add file size if available
+      const sizeText = format.filesize ? formatSize(format.filesize) : '';
+      
+      btn.innerHTML = `
+        <span class="quality-label">${escapeHtml(label)}</span>
+        <span class="quality-desc">${desc}</span>
+        ${sizeText ? `<span class="quality-size">${sizeText}</span>` : ''}
+      `;
+      
+      qualityOptions.appendChild(btn);
+    });
+    
+    // If no formats were added from response, add common ones
+    if (addedQualities.size === 0) {
+      qualityOrder.slice(0, 6).forEach(quality => {
+        const btn = document.createElement('button');
+        btn.className = 'quality-btn';
+        btn.dataset.quality = quality;
+        
+        const height = parseInt(quality);
+        let desc = '';
+        if (height >= 2160) desc = 'Ultra HD';
+        else if (height >= 1440) desc = 'Quad HD';
+        else if (height >= 1080) desc = 'Full HD';
+        else if (height >= 720) desc = 'HD';
+        else desc = 'SD';
+        
+        btn.innerHTML = `
+          <span class="quality-label">${quality}</span>
+          <span class="quality-desc">${desc}</span>
+        `;
+        
+        qualityOptions.appendChild(btn);
+      });
+    }
   }
   
   // Start download
@@ -170,6 +291,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (progressEl) {
       progressEl.classList.add('active');
     }
+    
+    // Close modal
+    qualityModal.classList.add('hidden');
   }
   
   // Escape HTML
@@ -321,12 +445,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
   
-  // Quality selection handlers
+  // Quality selection handler
   qualityOptions.addEventListener('click', (e) => {
     const btn = e.target.closest('.quality-btn');
     if (btn && selectedVideo) {
       const quality = btn.dataset.quality;
-      qualityModal.classList.add('hidden');
       
       // Find the download button for this video
       const videoItem = document.querySelector(`[data-url="${CSS.escape(selectedVideo.url)}"]`);

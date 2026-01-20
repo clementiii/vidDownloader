@@ -137,6 +137,70 @@ function pingCompanion() {
   }
 }
 
+// Get video info (formats) from companion
+function getVideoInfo(url) {
+  return new Promise((resolve) => {
+    if (!companionReady || !nativePort) {
+      // Return default options if companion not available
+      resolve({
+        success: false,
+        formats: getDefaultFormats()
+      });
+      return;
+    }
+    
+    // Set up one-time listener for info response
+    const infoHandler = (message) => {
+      if (message.type === 'info') {
+        resolve({
+          success: message.success,
+          title: message.title,
+          formats: message.formats || getDefaultFormats()
+        });
+      }
+    };
+    
+    // Store handler to remove later
+    const originalHandler = nativePort.onMessage.hasListener;
+    nativePort.onMessage.addListener(infoHandler);
+    
+    // Request info
+    try {
+      nativePort.postMessage({
+        action: 'info',
+        url: url
+      });
+      
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        nativePort.onMessage.removeListener(infoHandler);
+        resolve({
+          success: false,
+          formats: getDefaultFormats()
+        });
+      }, 10000);
+    } catch (e) {
+      resolve({
+        success: false,
+        formats: getDefaultFormats()
+      });
+    }
+  });
+}
+
+// Default format options
+function getDefaultFormats() {
+  return [
+    { quality: 'best', label: 'Best Quality', description: 'Highest available' },
+    { quality: '2160p', label: '4K (2160p)', description: 'Ultra HD' },
+    { quality: '1440p', label: '1440p', description: 'Quad HD' },
+    { quality: '1080p', label: '1080p', description: 'Full HD' },
+    { quality: '720p', label: '720p', description: 'HD' },
+    { quality: '480p', label: '480p', description: 'SD' },
+    { quality: '360p', label: '360p', description: 'Low' }
+  ];
+}
+
 // Initialize companion connection
 connectToCompanion();
 
@@ -386,6 +450,13 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log('[Video Downloader] Download request received:', message.video?.url, message.quality);
       downloadVideo(message.video, message.quality);
       break;
+      
+    case 'GET_VIDEO_INFO':
+      console.log('[Video Downloader] Getting video info:', message.url);
+      getVideoInfo(message.url).then(info => {
+        sendResponse(info);
+      });
+      return true; // Keep channel open for async response
       
     case 'CHECK_COMPANION':
       sendResponse({ ready: companionReady });
