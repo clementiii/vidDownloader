@@ -14,6 +14,9 @@ let currentDownload = {
   status: 'idle' // idle, downloading, merging, complete, error
 };
 
+// Track active browser downloads for cancellation
+let activeBrowserDownloadId = null;
+
 // Video file extensions and MIME types (only direct downloadable formats)
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.m4v', '.3gp', '.ogv'];
 const VIDEO_MIME_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo', 'video/x-flv', 'video/x-matroska'];
@@ -65,6 +68,9 @@ function connectToCompanion() {
         currentDownload.eta = message.eta;
         currentDownload.totalSize = message.totalSize;
         
+        // Update badge to show download progress
+        updateDownloadBadge(message.progress, message.status);
+        
         // Broadcast progress to popup
         browser.runtime.sendMessage({
           type: 'DOWNLOAD_PROGRESS',
@@ -85,6 +91,10 @@ function connectToCompanion() {
         currentDownload.active = false;
         currentDownload.status = message.success ? 'complete' : 'error';
         currentDownload.progress = message.success ? 100 : 0;
+        activeBrowserDownloadId = null;
+        
+        // Update badge to show completion status
+        updateDownloadBadge(100, message.success ? 'complete' : 'error');
         
         if (message.success) {
           browser.notifications.create({
@@ -168,9 +178,15 @@ function getVideoInfo(url) {
       return;
     }
     
+    let resolved = false;
+    let timeoutId = null;
+    
     // Set up one-time listener for info response
     const infoHandler = (message) => {
-      if (message.type === 'info') {
+      if (message.type === 'info' && !resolved) {
+        resolved = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        nativePort.onMessage.removeListener(infoHandler);
         resolve({
           success: message.success,
           title: message.title,
@@ -179,8 +195,6 @@ function getVideoInfo(url) {
       }
     };
     
-    // Store handler to remove later
-    const originalHandler = nativePort.onMessage.hasListener;
     nativePort.onMessage.addListener(infoHandler);
     
     // Request info
@@ -191,14 +205,20 @@ function getVideoInfo(url) {
       });
       
       // Timeout after 10 seconds
-      setTimeout(() => {
-        nativePort.onMessage.removeListener(infoHandler);
-        resolve({
-          success: false,
-          formats: getDefaultFormats()
-        });
+      timeoutId = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          nativePort.onMessage.removeListener(infoHandler);
+          resolve({
+            success: false,
+            formats: getDefaultFormats()
+          });
+        }
       }, 10000);
     } catch (e) {
+      resolved = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      nativePort.onMessage.removeListener(infoHandler);
       resolve({
         success: false,
         formats: getDefaultFormats()
@@ -417,6 +437,41 @@ function updateBadge(tabId) {
   });
 }
 
+// Update badge to show download progress
+function updateDownloadBadge(progress, status) {
+  let badgeText = '';
+  let badgeColor = '#58a6ff'; // Blue for downloading
+  
+  if (status === 'downloading' || status === 'merging') {
+    badgeText = Math.round(progress) + '%';
+    if (status === 'merging') {
+      badgeColor = '#d29922'; // Yellow for merging
+    }
+  } else if (status === 'complete') {
+    badgeText = '✓';
+    badgeColor = '#3fb950'; // Green for complete
+  } else if (status === 'error') {
+    badgeText = '!';
+    badgeColor = '#e53935'; // Red for error
+  }
+  
+  // Update badge on all tabs (download is global)
+  browser.browserAction.setBadgeText({ text: badgeText });
+  browser.browserAction.setBadgeBackgroundColor({ color: badgeColor });
+  
+  // Reset badge after completion/error
+  if (status === 'complete' || status === 'error') {
+    setTimeout(() => {
+      // Restore normal badge for active tab
+      browser.tabs.query({ active: true, currentWindow: true }).then(tabs => {
+        if (tabs[0]) {
+          updateBadge(tabs[0].id);
+        }
+      }).catch(() => {});
+    }, 3000);
+  }
+}
+
 // Monitor network requests for videos
 browser.webRequest.onHeadersReceived.addListener(
   (details) => {
@@ -530,7 +585,11 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
       
     case 'SCAN_PAGE':
-      browser.tabs.sendMessage(tabId, { type: 'SCAN_PAGE' });
+      if (tabId) {
+        browser.tabs.sendMessage(tabId, { type: 'SCAN_PAGE' }).catch(err => {
+          console.log('[Video Downloader] Could not send SCAN_PAGE to tab:', err.message);
+        });
+      }
       break;
       
     case 'CLEAR_VIDEOS':
@@ -538,10 +597,57 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       detectedVideos.set(tabId, new Map());
       updateBadge(tabId);
       break;
+      
+    case 'CANCEL_DOWNLOAD':
+      console.log('[Video Downloader] Cancel download requested');
+      cancelCurrentDownload();
+      break;
   }
   
   return true;
 });
+
+// Cancel current download
+function cancelCurrentDownload() {
+  // Cancel browser download if active
+  if (activeBrowserDownloadId !== null) {
+    browser.downloads.cancel(activeBrowserDownloadId).catch(() => {});
+    activeBrowserDownloadId = null;
+  }
+  
+  // Send cancel to companion app
+  if (nativePort && currentDownload.active) {
+    try {
+      nativePort.postMessage({ action: 'cancel' });
+    } catch (e) {
+      console.error('[Video Downloader] Failed to send cancel:', e);
+    }
+  }
+  
+  // Reset download state
+  const wasActive = currentDownload.active;
+  currentDownload = {
+    active: false,
+    videoId: null,
+    videoUrl: null,
+    progress: 0,
+    status: 'idle'
+  };
+  
+  // Notify popup
+  if (wasActive) {
+    browser.runtime.sendMessage({
+      type: 'DOWNLOAD_CANCELLED'
+    }).catch(() => {});
+    
+    // Reset badge
+    browser.tabs.query({ active: true, currentWindow: true }).then(tabs => {
+      if (tabs[0]) {
+        updateBadge(tabs[0].id);
+      }
+    }).catch(() => {});
+  }
+}
 
 // Download video function
 function downloadVideo(video, quality = 'best') {
@@ -629,6 +735,7 @@ function downloadVideo(video, quality = 'best') {
   }).then(downloadId => {
     console.log('[Video Downloader] Browser download started:', downloadId);
     
+    activeBrowserDownloadId = downloadId;
     currentDownload = {
       active: true,
       videoId: video.id,

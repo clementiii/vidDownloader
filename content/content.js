@@ -5,6 +5,11 @@
   
   const detectedSources = new Set();
   
+  // Scan scheduling variables (declared early for use throughout)
+  let scanScheduled = false;
+  let lastScanTime = 0;
+  const MIN_SCAN_INTERVAL = 2000; // Minimum 2 seconds between scans
+  
   // Video source patterns (excluding streaming playlists which need special handling)
   const VIDEO_EXTENSIONS = /\.(mp4|webm|mkv|avi|mov|flv|wmv|m4v|3gp|ogv)/i;
   
@@ -172,63 +177,75 @@
   function extractYouTubeVideos() {
     console.log('[Video Downloader] Extracting YouTube videos...');
     
-    try {
-      let playerResponse = null;
-      
-      const scripts = document.querySelectorAll('script');
-      for (const script of scripts) {
-        const text = script.textContent || '';
-        
-        const match = text.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/);
-        if (match) {
-          try {
-            playerResponse = JSON.parse(match[1]);
-            break;
-          } catch (e) {}
-        }
-        
-        const match2 = text.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/);
-        if (match2) {
-          try {
-            playerResponse = JSON.parse(match2[1]);
-            break;
-          } catch (e) {}
-        }
-      }
-      
-      if (!playerResponse && window.ytInitialPlayerResponse) {
-        playerResponse = window.ytInitialPlayerResponse;
-      }
-      
-      if (playerResponse) {
-        const videoDetails = playerResponse.videoDetails || {};
-        
-        const title = videoDetails.title || 'YouTube Video';
-        const videoId = videoDetails.videoId || '';
-        const thumbnail = videoDetails.thumbnail?.thumbnails?.slice(-1)[0]?.url || '';
-        
-        console.log('[Video Downloader] Found YouTube video:', title);
-        
-        if (videoId) {
-          reportVideo({
-            src: `https://www.youtube.com/watch?v=${videoId}`,
-            type: 'youtube/page',
-            poster: thumbnail,
-            title: title,
-            quality: 'All Qualities',
-            needsCompanion: true,
-            siteName: 'YouTube',
-            isFullVideo: true
-          });
-        }
-        
-        return true;
-      }
-    } catch (e) {
-      console.error('[Video Downloader] YouTube extraction error:', e);
+    const pageUrl = window.location.href;
+    
+    // Only process watch pages
+    if (!pageUrl.includes('/watch')) {
+      console.log('[Video Downloader] Not a YouTube watch page, skipping');
+      return false;
     }
     
-    return false;
+    // Extract video ID from current URL (most reliable for SPA navigation)
+    const urlParams = new URLSearchParams(window.location.search);
+    const videoId = urlParams.get('v');
+    
+    if (!videoId) {
+      console.log('[Video Downloader] No video ID found in URL');
+      return false;
+    }
+    
+    // Get title from page - try multiple sources (in order of reliability for SPA)
+    let title = 'YouTube Video';
+    
+    // Method 1: Try the video title element - multiple selectors for different YouTube layouts
+    const titleSelectors = [
+      '#above-the-fold #title yt-formatted-string',  // New layout
+      'h1.ytd-watch-metadata yt-formatted-string',   // Watch metadata  
+      '#title h1 yt-formatted-string',               // Older layout
+      'h1.ytd-video-primary-info-renderer yt-formatted-string', // Primary info
+      '#info-contents h1 yt-formatted-string',       // Info contents
+      'ytd-watch-metadata h1'                        // Fallback
+    ];
+    
+    for (const selector of titleSelectors) {
+      const el = document.querySelector(selector);
+      if (el && el.textContent && el.textContent.trim()) {
+        title = el.textContent.trim();
+        break;
+      }
+    }
+    
+    // Method 2: Try document title (more reliable than meta on SPA navigation)
+    if (title === 'YouTube Video' && document.title && !document.title.includes('YouTube')) {
+      title = document.title.replace(/ - YouTube$/, '').trim();
+    }
+    
+    // Method 3: Try meta tags (may be stale but better than nothing)
+    if (title === 'YouTube Video') {
+      const ogTitle = document.querySelector('meta[property="og:title"]');
+      if (ogTitle && ogTitle.content) {
+        title = ogTitle.content;
+      }
+    }
+    
+    // Get thumbnail - always use video ID for YouTube to ensure it's current
+    // YouTube thumbnails follow a predictable URL pattern based on video ID
+    const thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    
+    console.log('[Video Downloader] Found YouTube video:', title, 'ID:', videoId);
+    
+    reportVideo({
+      src: `https://www.youtube.com/watch?v=${videoId}`,
+      type: 'youtube/page',
+      poster: thumbnail,
+      title: title,
+      quality: 'All Qualities',
+      needsCompanion: true,
+      siteName: 'YouTube',
+      isFullVideo: true
+    });
+    
+    return true;
   }
   
   // Store captured m3u8 URLs from network
@@ -459,16 +476,39 @@
   
   // Scan iframe for videos
   function scanIframe(iframe) {
+    // Skip iframe scanning if we're already on a supported site (avoids duplicates)
+    if (currentSite) return;
+    
     // Check if iframe is from a supported site
     try {
       const iframeSrc = iframe.src || '';
+      if (!iframeSrc) return;
+      
       for (const domain of Object.keys(SUPPORTED_SITES)) {
         if (iframeSrc.includes(domain)) {
+          // Try to extract video ID for better title
+          let videoTitle = `Embedded ${SUPPORTED_SITES[domain].name} Video`;
+          let normalizedUrl = iframeSrc;
+          
+          // Extract YouTube video ID and create watch URL
+          if (domain.includes('youtube') || domain.includes('youtu.be')) {
+            const videoIdMatch = iframeSrc.match(/(?:embed\/|v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+            if (videoIdMatch) {
+              const videoId = videoIdMatch[1];
+              normalizedUrl = `https://www.youtube.com/watch?v=${videoId}`;
+              // Try to get title from iframe attributes
+              const iframeTitle = iframe.title || iframe.getAttribute('aria-label') || '';
+              if (iframeTitle && !iframeTitle.toLowerCase().includes('youtube')) {
+                videoTitle = iframeTitle;
+              }
+            }
+          }
+          
           reportVideo({
-            src: iframeSrc,
+            src: normalizedUrl,
             type: `${SUPPORTED_SITES[domain].name.toLowerCase()}/embed`,
             poster: '',
-            title: `Embedded ${SUPPORTED_SITES[domain].name} Video`,
+            title: videoTitle,
             quality: 'Best Available',
             needsCompanion: true,
             siteName: SUPPORTED_SITES[domain].name,
@@ -707,22 +747,58 @@
   
   // Listen for SPA navigation on supported sites
   let lastUrl = location.href;
-  const urlObserver = new MutationObserver(() => {
-    if (location.href !== lastUrl) {
+  let navigationTimeout = null;
+  
+  function handleNavigation() {
+    if (location.href === lastUrl) return;
+    
+    // Debounce rapid URL changes
+    if (navigationTimeout) {
+      clearTimeout(navigationTimeout);
+    }
+    
+    navigationTimeout = setTimeout(() => {
+      if (location.href === lastUrl) return;
+      
       lastUrl = location.href;
       console.log('[Video Downloader] Navigation detected:', location.href);
       
       // Clear local tracking
       detectedSources.clear();
-      detectedHlsStreaming = false; // Reset HLS detection flag
+      detectedHlsStreaming = false;
+      capturedM3u8Urls = [];
       
       // Tell background to clear videos for this tab
       browser.runtime.sendMessage({ type: 'CLEAR_VIDEOS' }).catch(() => {});
       
-      // Wait for new page to load, then scan
+      // Wait for new page content to load, then scan
       setTimeout(() => {
-        scanPage();
-      }, 1500);
+        scheduleScan(500);
+      }, 1000);
+    }, 100);
+  }
+  
+  // Method 1: Intercept history.pushState and replaceState (most reliable for SPAs)
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+  
+  history.pushState = function(...args) {
+    originalPushState.apply(this, args);
+    handleNavigation();
+  };
+  
+  history.replaceState = function(...args) {
+    originalReplaceState.apply(this, args);
+    handleNavigation();
+  };
+  
+  // Method 2: Listen for popstate (browser back/forward buttons)
+  window.addEventListener('popstate', handleNavigation);
+  
+  // Method 3: MutationObserver as backup for other navigation methods
+  const urlObserver = new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+      handleNavigation();
     }
   });
   
@@ -730,19 +806,87 @@
     urlObserver.observe(document.body, { childList: true, subtree: true });
   }
   
+  // Method 4: Periodic check as final fallback (for edge cases)
+  setInterval(() => {
+    if (location.href !== lastUrl) {
+      handleNavigation();
+    }
+  }, 1000);
+  
+  // Method 5: YouTube-specific navigation event
+  if (isYouTube) {
+    // Track the last video ID we detected to know when it changes
+    let lastVideoId = new URLSearchParams(window.location.search).get('v');
+    
+    function checkYouTubeVideoChange() {
+      const currentVideoId = new URLSearchParams(window.location.search).get('v');
+      if (currentVideoId && currentVideoId !== lastVideoId) {
+        console.log('[Video Downloader] YouTube video changed:', lastVideoId, '->', currentVideoId);
+        lastVideoId = currentVideoId;
+        
+        // Clear and rescan
+        detectedSources.clear();
+        browser.runtime.sendMessage({ type: 'CLEAR_VIDEOS' }).catch(() => {});
+        
+        // Wait for page to update, then scan multiple times
+        // First scan after 800ms
+        setTimeout(() => {
+          scanScheduled = false;
+          lastScanTime = 0;
+          scanPage();
+          
+          // Second scan after another 1.5s to catch late updates
+          setTimeout(() => {
+            detectedSources.clear(); // Clear again to get fresh data
+            browser.runtime.sendMessage({ type: 'CLEAR_VIDEOS' }).catch(() => {});
+            setTimeout(scanPage, 200);
+          }, 1500);
+        }, 800);
+      }
+    }
+    
+    document.addEventListener('yt-navigate-finish', () => {
+      console.log('[Video Downloader] YouTube navigation finished');
+      // Wait a bit for URL to update, then check
+      setTimeout(checkYouTubeVideoChange, 300);
+    });
+    
+    // Also listen for when video data changes
+    document.addEventListener('yt-page-data-updated', () => {
+      console.log('[Video Downloader] YouTube page data updated');
+      setTimeout(checkYouTubeVideoChange, 300);
+    });
+    
+    // Listen for clicks on video links (backup detection)
+    document.addEventListener('click', (e) => {
+      const link = e.target.closest('a[href*="/watch?v="]');
+      if (link) {
+        // A video link was clicked, check for change after navigation
+        setTimeout(checkYouTubeVideoChange, 1500);
+      }
+    }, true);
+  }
+  
   // Listen for messages from background
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'SCAN_PAGE') {
+      console.log('[Video Downloader] SCAN_PAGE received, rescanning...');
       detectedSources.clear();
       detectedHlsStreaming = false;
       capturedM3u8Urls = []; // Reset captured URLs
       
-      // Wait a moment then scan
+      // Reset scan scheduling to allow immediate scan
+      scanScheduled = false;
+      lastScanTime = 0;
+      
+      // Scan immediately
+      scanPage();
+      
+      // Also do a delayed rescan to catch player-loaded URLs
       setTimeout(() => {
+        scanScheduled = false;
         scanPage();
-        // Also do a delayed rescan to catch player-loaded URLs
-        setTimeout(scanPage, 2000);
-      }, 500);
+      }, 2000);
     }
     
     if (message.type === 'FORCE_DOWNLOAD') {
@@ -766,19 +910,38 @@
     }
   });
   
+  // Smart scanning with deduplication
+  function scheduleScan(delay = 500) {
+    if (scanScheduled) return;
+    
+    const now = Date.now();
+    const timeSinceLastScan = now - lastScanTime;
+    const actualDelay = Math.max(delay, MIN_SCAN_INTERVAL - timeSinceLastScan);
+    
+    scanScheduled = true;
+    setTimeout(() => {
+      scanScheduled = false;
+      lastScanTime = Date.now();
+      scanPage();
+    }, actualDelay);
+  }
+  
   // Initial scan
   if (document.readyState === 'complete') {
-    setTimeout(scanPage, 500);  // Small delay to let video player initialize
+    scheduleScan(500);  // Small delay to let video player initialize
   } else {
     window.addEventListener('load', () => {
-      setTimeout(scanPage, 1000);  // Longer delay after load
+      scheduleScan(1000);  // Longer delay after load
     });
   }
   
-  // Rescan after delays for lazy-loaded content and video player initialization
-  setTimeout(scanPage, 3000);   // Video players often take time to load
-  setTimeout(scanPage, 6000);   // Final rescan for slow sites
-  setTimeout(scanPage, 10000);  // Extra late scan for very slow sites
+  // Single delayed rescan for lazy-loaded content (instead of 3 separate scans)
+  // Only rescan if we haven't found videos yet
+  setTimeout(() => {
+    if (detectedSources.size === 0) {
+      scheduleScan(0);
+    }
+  }, 4000);
   
   console.log('[Video Downloader] Content script loaded on:', window.location.hostname);
   console.log('[Video Downloader] Current site info:', currentSite);

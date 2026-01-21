@@ -34,6 +34,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   let companionReady = false;
   let selectedVideo = null;
   let activeDownloads = new Map(); // Track all downloads
+  let lastScanTime = 0; // For debouncing scan button
+  const SCAN_DEBOUNCE_MS = 2000; // Minimum time between scans
   
   // Tab switching
   tabBtns.forEach(btn => {
@@ -231,15 +233,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     li.className = 'download-item';
     li.dataset.url = download.url;
     
-    const iconClass = download.status === 'complete' ? 'complete' : 
-                      download.status === 'error' ? 'error' : '';
-    
-    const icon = download.status === 'complete' 
-      ? '<polyline points="20 6 9 17 4 12"/>'
-      : download.status === 'error'
-      ? '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'
-      : '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>';
-    
     const statusClass = download.status === 'complete' ? 'complete' : 
                         download.status === 'error' ? 'error' : '';
     
@@ -254,13 +247,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (download.eta) statsInfo.push(`⏱️ ${download.eta}`);
     const statsText = statsInfo.join(' • ');
     
-    li.innerHTML = `
-      <div class="download-item-header">
+    // Show thumbnail if available, otherwise show status icon
+    let thumbnailHtml;
+    if (download.poster) {
+      thumbnailHtml = `
+        <div class="download-thumbnail">
+          <img src="${escapeHtml(download.poster)}" alt="Thumbnail" onerror="this.parentElement.innerHTML='<svg width=\\'24\\' height=\\'24\\' viewBox=\\'0 0 24 24\\' fill=\\'none\\' stroke=\\'currentColor\\' stroke-width=\\'2\\'><rect x=\\'2\\' y=\\'4\\' width=\\'20\\' height=\\'16\\' rx=\\'2\\'/><path d=\\'M10 9l5 3-5 3V9z\\'/></svg>'">
+          ${download.status === 'complete' ? '<div class="download-thumbnail-overlay complete"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>' : ''}
+          ${download.status === 'error' ? '<div class="download-thumbnail-overlay error"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>' : ''}
+        </div>
+      `;
+    } else {
+      const iconClass = download.status === 'complete' ? 'complete' : 
+                        download.status === 'error' ? 'error' : '';
+      const icon = download.status === 'complete' 
+        ? '<polyline points="20 6 9 17 4 12"/>'
+        : download.status === 'error'
+        ? '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'
+        : '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>';
+      thumbnailHtml = `
         <div class="download-icon ${iconClass}">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             ${icon}
           </svg>
         </div>
+      `;
+    }
+    
+    li.innerHTML = `
+      <div class="download-item-header">
+        ${thumbnailHtml}
         <div class="download-details">
           <div class="download-title" title="${escapeHtml(download.title)}">${escapeHtml(download.title)}</div>
           <div class="download-status ${statusClass}">${statusText}</div>
@@ -282,18 +298,66 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Cancel button
     const cancelBtn = li.querySelector('.download-cancel-btn');
     if (cancelBtn) {
-      cancelBtn.addEventListener('click', () => {
+      cancelBtn.addEventListener('click', async () => {
+        // Send cancel request to background
+        try {
+          await browser.runtime.sendMessage({ type: 'CANCEL_DOWNLOAD' });
+        } catch (e) {
+          console.error('Failed to cancel download:', e);
+        }
+        
         // Remove from active downloads
         activeDownloads.delete(download.url);
         renderDownloadsList();
-        // TODO: Actually cancel the download in background
       });
     }
     
     return li;
   }
   
-  // Render downloads list
+  // Update only the progress of an existing download item (no flicker)
+  function updateDownloadItemProgress(download) {
+    const existingItem = downloadsList.querySelector(`[data-url="${CSS.escape(download.url)}"]`);
+    if (!existingItem) return false;
+    
+    // Update status text
+    const statusEl = existingItem.querySelector('.download-status');
+    if (statusEl) {
+      statusEl.textContent = download.statusText || `Downloading... ${Math.round(download.progress)}%`;
+      statusEl.className = 'download-status' + (download.status === 'error' ? ' error' : '');
+    }
+    
+    // Update progress bar
+    const progressFill = existingItem.querySelector('.download-progress-fill');
+    if (progressFill) {
+      progressFill.style.width = `${download.progress}%`;
+    }
+    
+    // Update stats (speed, ETA)
+    let statsEl = existingItem.querySelector('.download-stats');
+    const statsInfo = [];
+    if (download.speed) statsInfo.push(`⚡ ${download.speed}`);
+    if (download.remaining) statsInfo.push(`${download.remaining} left`);
+    if (download.eta) statsInfo.push(`⏱️ ${download.eta}`);
+    const statsText = statsInfo.join(' • ');
+    
+    if (statsText && download.status !== 'complete' && download.status !== 'error') {
+      if (!statsEl) {
+        // Create stats element if it doesn't exist
+        statsEl = document.createElement('div');
+        statsEl.className = 'download-stats';
+        const detailsEl = existingItem.querySelector('.download-details');
+        if (detailsEl) detailsEl.appendChild(statsEl);
+      }
+      statsEl.textContent = statsText;
+    } else if (statsEl) {
+      statsEl.textContent = '';
+    }
+    
+    return true;
+  }
+  
+  // Render downloads list (only call when adding/removing items)
   function renderDownloadsList() {
     if (activeDownloads.size === 0) {
       noDownloads.classList.remove('hidden');
@@ -442,6 +506,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     activeDownloads.set(video.url, {
       url: video.url,
       title: video.title || video.filename || 'Video',
+      poster: video.poster || '',
       quality: quality,
       progress: 0,
       status: 'downloading',
@@ -594,11 +659,27 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
   
-  // Scan page
+  // Scan page with debouncing
   async function scanPage() {
-    scanBtn.querySelector('svg').style.animation = 'spin 0.8s linear infinite';
+    const now = Date.now();
+    if (now - lastScanTime < SCAN_DEBOUNCE_MS) {
+      console.log('Scan debounced, please wait');
+      return;
+    }
+    lastScanTime = now;
+    
+    const svgElement = scanBtn.querySelector('svg');
+    if (svgElement) {
+      svgElement.style.animation = 'spin 0.8s linear infinite';
+    }
     
     try {
+      // Ensure we have the current tab ID
+      if (!currentTabId) {
+        const tab = await getCurrentTab();
+        currentTabId = tab.id;
+      }
+      
       await browser.runtime.sendMessage({
         type: 'SCAN_PAGE',
         tabId: currentTabId
@@ -606,16 +687,31 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       setTimeout(() => {
         loadVideos();
-        scanBtn.querySelector('svg').style.animation = '';
+        if (svgElement) {
+          svgElement.style.animation = '';
+        }
       }, 1000);
     } catch (error) {
       console.error('Error scanning:', error);
-      scanBtn.querySelector('svg').style.animation = '';
+      if (svgElement) {
+        svgElement.style.animation = '';
+      }
     }
   }
   
-  // Clear videos
+  // Clear videos with confirmation
   async function clearVideos() {
+    // Get current video count
+    const videoItems = videoList.querySelectorAll('.video-item');
+    const count = videoItems.length;
+    
+    if (count === 0) return;
+    
+    // Show confirmation for multiple videos
+    if (count > 1 && !confirm(`Clear all ${count} detected videos?`)) {
+      return;
+    }
+    
     try {
       await browser.runtime.sendMessage({
         type: 'CLEAR_VIDEOS',
@@ -639,15 +735,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
   
-  closeModal.addEventListener('click', () => {
+  // Close modal function
+  function closeQualityModal() {
     qualityModal.classList.add('hidden');
     selectedVideo = null;
-  });
+  }
+  
+  closeModal.addEventListener('click', closeQualityModal);
   
   qualityModal.addEventListener('click', (e) => {
     if (e.target === qualityModal) {
-      qualityModal.classList.add('hidden');
-      selectedVideo = null;
+      closeQualityModal();
+    }
+  });
+  
+  // Escape key to close modals
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (!qualityModal.classList.contains('hidden')) {
+        closeQualityModal();
+      }
+      if (!pinTooltip.classList.contains('hidden')) {
+        pinTooltip.classList.add('hidden');
+      }
     }
   });
   
@@ -685,7 +795,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             download.statusText = `Downloading... ${Math.round(message.progress)}%`;
         }
         
-        renderDownloadsList();
+        // Update existing item in place (no flicker) instead of re-rendering
+        if (!updateDownloadItemProgress(download)) {
+          // Item doesn't exist yet, need full render
+          renderDownloadsList();
+        }
       }
       
       // Update video tab progress
@@ -745,6 +859,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (etaEl) {
           etaEl.textContent = message.eta ? `⏱️ ${message.eta}` : '';
         }
+      });
+    }
+    
+    if (message.type === 'DOWNLOAD_CANCELLED') {
+      // Clear all active downloads on cancel
+      activeDownloads.clear();
+      renderDownloadsList();
+      
+      // Reset download buttons
+      document.querySelectorAll('.download-btn.downloading').forEach(btn => {
+        btn.classList.remove('downloading');
+        btn.innerHTML = `
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        `;
+      });
+      
+      // Reset progress containers
+      document.querySelectorAll('.progress-container.active').forEach(el => {
+        el.classList.remove('active');
+        const fill = el.querySelector('.progress-fill');
+        if (fill) fill.style.width = '0%';
       });
     }
     

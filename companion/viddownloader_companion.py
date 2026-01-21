@@ -12,6 +12,7 @@ import os
 import threading
 import re
 import logging
+import signal
 
 # Set up logging to file for debugging
 LOG_FILE = os.path.join(os.path.expanduser("~"), "viddownloader_debug.log")
@@ -23,6 +24,13 @@ logging.basicConfig(
 
 # Get the downloads folder
 DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
+
+# Thread lock for send_message to prevent message corruption
+message_lock = threading.Lock()
+
+# Track active download process for cancellation
+active_download_process = None
+download_cancelled = False
 
 # Make stdin/stdout unbuffered
 if sys.platform == 'win32':
@@ -52,21 +60,22 @@ def get_message():
         return None
 
 def send_message(message):
-    """Send a message to the extension"""
-    try:
-        encoded = json.dumps(message).encode('utf-8')
-        logging.debug(f"Sending message: {message.get('type', 'unknown')}")
-        
-        # Write length prefix
-        sys.stdout.buffer.write(struct.pack('=I', len(encoded)))
-        # Write message
-        sys.stdout.buffer.write(encoded)
-        # Flush immediately
-        sys.stdout.buffer.flush()
-        
-        logging.debug("Message sent and flushed")
-    except Exception as e:
-        logging.error(f"Error sending message: {e}")
+    """Send a message to the extension (thread-safe)"""
+    with message_lock:
+        try:
+            encoded = json.dumps(message).encode('utf-8')
+            logging.debug(f"Sending message: {message.get('type', 'unknown')}")
+            
+            # Write length prefix
+            sys.stdout.buffer.write(struct.pack('=I', len(encoded)))
+            # Write message
+            sys.stdout.buffer.write(encoded)
+            # Flush immediately
+            sys.stdout.buffer.flush()
+            
+            logging.debug("Message sent and flushed")
+        except Exception as e:
+            logging.error(f"Error sending message: {e}")
 
 def sanitize_filename(filename):
     """Remove invalid characters from filename"""
@@ -143,7 +152,10 @@ def get_format_list(formats):
 
 def download_video(url, quality='best', output_folder=None, page_url=None):
     """Download video using yt-dlp"""
+    global active_download_process, download_cancelled
+    
     logging.info(f"Starting download: {url} at {quality}")
+    download_cancelled = False
     
     if output_folder is None:
         output_folder = DOWNLOADS_FOLDER
@@ -214,11 +226,29 @@ def download_video(url, quality='best', output_folder=None, page_url=None):
             creationflags=creationflags
         )
         
+        # Track process for cancellation
+        active_download_process = process
+        
         filename = None
         last_progress = 0
         last_error = None
         
         for line in process.stdout:
+            # Check if download was cancelled
+            if download_cancelled:
+                logging.info("Download cancelled by user")
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                send_message({
+                    'type': 'complete',
+                    'success': False,
+                    'error': 'Download cancelled'
+                })
+                active_download_process = None
+                return
             line = line.strip()
             logging.debug(f"yt-dlp output: {line}")
             
@@ -330,7 +360,14 @@ def download_video(url, quality='best', output_folder=None, page_url=None):
         
         process.wait()
         
+        # Clear active process
+        active_download_process = None
+        
         logging.info(f"Download finished with return code: {process.returncode}")
+        
+        # Don't send completion if cancelled
+        if download_cancelled:
+            return
         
         if process.returncode == 0:
             send_message({
@@ -348,6 +385,7 @@ def download_video(url, quality='best', output_folder=None, page_url=None):
             })
             
     except Exception as e:
+        active_download_process = None
         logging.error(f"Download error: {e}")
         send_message({
             'type': 'complete',
@@ -357,6 +395,7 @@ def download_video(url, quality='best', output_folder=None, page_url=None):
 
 def main():
     """Main loop - handle messages from extension"""
+    global download_cancelled
     logging.info("Companion app started")
     
     # Check if yt-dlp is installed
@@ -414,8 +453,14 @@ def main():
             logging.info("Download thread started")
         
         elif action == 'cancel':
-            logging.info("Cancel requested (not implemented)")
-            pass
+            logging.info("Cancel requested")
+            download_cancelled = True
+            if active_download_process:
+                try:
+                    active_download_process.terminate()
+                    logging.info("Sent terminate signal to download process")
+                except Exception as e:
+                    logging.error(f"Error terminating process: {e}")
 
 if __name__ == '__main__':
     try:
