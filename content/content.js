@@ -46,13 +46,20 @@
     'xhamster.com': { name: 'xHamster', needsCompanion: true },
     'missav.com': { name: 'MissAV', needsCompanion: true },
     'missav.live': { name: 'MissAV', needsCompanion: true },
+    'missav.ws': { name: 'MissAV', needsCompanion: true },
+    'missav.ai': { name: 'MissAV', needsCompanion: true },
+    'missav.to': { name: 'MissAV', needsCompanion: true },
     'jable.tv': { name: 'Jable', needsCompanion: true },
     'javhd.com': { name: 'JAVHD', needsCompanion: true },
+    'njav.tv': { name: 'NJAV', needsCompanion: true },
     'spankbang.com': { name: 'SpankBang', needsCompanion: true },
     'redtube.com': { name: 'RedTube', needsCompanion: true },
     'youporn.com': { name: 'YouPorn', needsCompanion: true },
     'tube8.com': { name: 'Tube8', needsCompanion: true },
     'eporner.com': { name: 'EPorner', needsCompanion: true },
+    'avgle.com': { name: 'Avgle', needsCompanion: true },
+    'javtiful.com': { name: 'Javtiful', needsCompanion: true },
+    'thisav.com': { name: 'ThisAV', needsCompanion: true },
     // Other streaming sites
     'odysee.com': { name: 'Odysee', needsCompanion: true },
     'rumble.com': { name: 'Rumble', needsCompanion: true },
@@ -75,6 +82,10 @@
   
   const currentSite = getCurrentSiteInfo();
   const isYouTube = currentSite?.domain?.includes('youtube') || currentSite?.domain?.includes('youtu.be');
+
+  function isStreamingManifestUrl(url) {
+    return typeof url === 'string' && /\.(m3u8|mpd)(\?|$)/i.test(url);
+  }
   
   // Send detected video to background script
   function reportVideo(videoData) {
@@ -301,7 +312,7 @@
     
     // Search in all scripts for m3u8 URLs
     const scripts = document.querySelectorAll('script');
-    const m3u8Pattern = /(https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)/gi;
+    const m3u8Pattern = /(https?:\/\/[^\s"'<>\\]+\.(?:m3u8|mpd)[^\s"'<>\\]*)/gi;
     
     for (const script of scripts) {
       const text = script.textContent || '';
@@ -331,11 +342,11 @@
     }
     
     // Also check for m3u8 in data attributes
-    const elements = document.querySelectorAll('[data-src*=".m3u8"], [data-url*=".m3u8"], [data-video*=".m3u8"]');
+    const elements = document.querySelectorAll('[data-src*=".m3u8"], [data-url*=".m3u8"], [data-video*=".m3u8"], [data-src*=".mpd"], [data-url*=".mpd"], [data-video*=".mpd"]');
     for (const el of elements) {
       const url = el.getAttribute('data-src') || el.getAttribute('data-url') || el.getAttribute('data-video');
-      if (url && url.includes('.m3u8')) {
-        console.log('[Video Downloader] Found m3u8 in data attribute:', url);
+      if (isStreamingManifestUrl(url)) {
+        console.log('[Video Downloader] Found streaming manifest in data attribute:', url);
         return url;
       }
     }
@@ -344,8 +355,8 @@
     if (window.performance) {
       const entries = window.performance.getEntriesByType('resource');
       for (const entry of entries) {
-        if (entry.name.includes('.m3u8') && !entry.name.includes('preview') && !entry.name.includes('thumb')) {
-          console.log('[Video Downloader] Found m3u8 in performance entries:', entry.name);
+        if (isStreamingManifestUrl(entry.name) && !entry.name.includes('preview') && !entry.name.includes('thumb')) {
+          console.log('[Video Downloader] Found streaming manifest in performance entries:', entry.name);
           return entry.name;
         }
       }
@@ -561,10 +572,12 @@
     const metaTags = document.querySelectorAll('meta[property*="video"], meta[name*="video"]');
     metaTags.forEach(meta => {
       const content = meta.getAttribute('content');
-      if (content && VIDEO_EXTENSIONS.test(content)) {
+      if (content && (VIDEO_EXTENSIONS.test(content) || isStreamingManifestUrl(content))) {
         reportVideo({
           src: content,
-          title: document.title
+          title: document.title,
+          needsCompanion: isStreamingManifestUrl(content),
+          type: isStreamingManifestUrl(content) ? 'video/page' : ''
         });
       }
     });
@@ -576,7 +589,9 @@
       if (content && !content.includes('facebook.com/plugins')) {
         reportVideo({
           src: content,
-          title: document.title
+          title: document.title,
+          needsCompanion: isStreamingManifestUrl(content),
+          type: isStreamingManifestUrl(content) ? 'video/page' : ''
         });
       }
     }
@@ -596,10 +611,12 @@
     if (depth > 10 || !obj) return;
     
     if (typeof obj === 'string') {
-      if (VIDEO_EXTENSIONS.test(obj) && obj.startsWith('http') && !obj.includes('googlevideo.com')) {
+      if ((VIDEO_EXTENSIONS.test(obj) || isStreamingManifestUrl(obj)) && obj.startsWith('http') && !obj.includes('googlevideo.com')) {
         reportVideo({
           src: obj,
-          title: document.title
+          title: document.title,
+          needsCompanion: isStreamingManifestUrl(obj),
+          type: isStreamingManifestUrl(obj) ? 'video/page' : ''
         });
       }
       return;
@@ -614,10 +631,12 @@
       const videoProps = ['contentUrl', 'embedUrl', 'videoUrl', 'url', 'src', 'file', 'source', 'stream', 'video_url', 'media_url'];
       videoProps.forEach(prop => {
         if (obj[prop] && typeof obj[prop] === 'string') {
-          if ((VIDEO_EXTENSIONS.test(obj[prop]) || obj['@type']?.includes('Video')) && !obj[prop].includes('googlevideo.com')) {
+          if ((VIDEO_EXTENSIONS.test(obj[prop]) || isStreamingManifestUrl(obj[prop]) || obj['@type']?.includes('Video')) && !obj[prop].includes('googlevideo.com')) {
             reportVideo({
               src: obj[prop],
-              title: document.title
+              title: document.title,
+              needsCompanion: isStreamingManifestUrl(obj[prop]),
+              type: isStreamingManifestUrl(obj[prop]) ? 'video/page' : ''
             });
           }
         }
@@ -643,6 +662,12 @@
     // For known supported sites with blob/HLS, report the page URL
     if (currentSite && !detectedHlsStreaming) {
       reportPageUrl();
+    }
+
+    // Unknown HLS/DASH sites: report the manifest/page for yt-dlp instead of treating it as a direct file.
+    if (!currentSite && !detectedHlsStreaming && findM3u8Url()) {
+      detectedHlsStreaming = true;
+      reportPageAsVideo();
     }
     
     // If we detected HLS streaming, the page URL has already been reported
@@ -677,7 +702,9 @@
               if (item && item.file) {
                 reportVideo({
                   src: item.file,
-                  title: item.title || document.title
+                  title: item.title || document.title,
+                  needsCompanion: isStreamingManifestUrl(item.file),
+                  type: isStreamingManifestUrl(item.file) ? 'video/page' : ''
                 });
               }
             }
@@ -696,7 +723,9 @@
             if (src && !src.startsWith('blob:')) {
               reportVideo({
                 src: src,
-                title: document.title
+                title: document.title,
+                needsCompanion: isStreamingManifestUrl(src),
+                type: isStreamingManifestUrl(src) ? 'video/page' : ''
               });
             }
           }
@@ -710,7 +739,9 @@
       if (src && (VIDEO_EXTENSIONS.test(src) || src.startsWith('http'))) {
         reportVideo({
           src: src,
-          title: document.title
+          title: document.title,
+          needsCompanion: isStreamingManifestUrl(src),
+          type: isStreamingManifestUrl(src) ? 'video/page' : ''
         });
       }
     });
@@ -887,6 +918,8 @@
         scanScheduled = false;
         scanPage();
       }, 2000);
+      sendResponse({ ok: true });
+      return false;
     }
     
     if (message.type === 'FORCE_DOWNLOAD') {
@@ -897,6 +930,8 @@
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+      sendResponse({ ok: true });
+      return false;
     }
     
     if (message.type === 'COPY_YTDLP_COMMAND') {
@@ -907,6 +942,8 @@
         console.error('[Video Downloader] Failed to copy:', err);
         prompt('Copy this command:', cmd);
       });
+      sendResponse({ ok: true });
+      return false;
     }
   });
   

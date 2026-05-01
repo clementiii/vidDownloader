@@ -128,7 +128,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Update tab counts
   function updateTabCounts(videoCount, downloadCount) {
     videosTabCount.textContent = videoCount || 0;
-    downloadsTabCount.textContent = downloadCount || activeDownloads.size;
+    downloadsTabCount.textContent = downloadCount ?? activeDownloads.size;
+  }
+
+  function syncActiveDownloads(downloads = []) {
+    activeDownloads = new Map(downloads.map(download => [download.url, download]));
+    renderDownloadsList();
   }
   
   // Create video item element
@@ -580,6 +585,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       
       const videos = response.videos || [];
+      syncActiveDownloads(response.activeDownloads || []);
       updateCompanionStatus(response.companionReady);
       
       loading.classList.add('hidden');
@@ -597,11 +603,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         videoList.classList.remove('hidden');
         videoCount.textContent = `${videos.length} video${videos.length !== 1 ? 's' : ''} found`;
         
-        const downloadState = response.downloadState;
-        if (downloadState && downloadState.active) {
-          restoreDownloadState(downloadState);
-        }
       }
+
+      restoreVisibleDownloadStates();
       
       updateTabCounts(videos.length, activeDownloads.size);
     } catch (error) {
@@ -658,6 +662,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
   }
+
+  function restoreVisibleDownloadStates() {
+    activeDownloads.forEach(download => {
+      if (download.status === 'complete' || download.status === 'error' || download.status === 'cancelled') return;
+      restoreDownloadState({
+        videoUrl: download.url,
+        progress: download.progress || 0,
+        status: download.status || 'downloading'
+      });
+    });
+  }
   
   // Scan page with debouncing
   async function scanPage() {
@@ -680,10 +695,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         currentTabId = tab.id;
       }
       
-      await browser.runtime.sendMessage({
+      const response = await browser.runtime.sendMessage({
         type: 'SCAN_PAGE',
         tabId: currentTabId
       });
+
+      if (response && response.ok === false) {
+        console.warn('Page scan could not be started:', response.error);
+        videoCount.textContent = 'Cannot scan this page';
+      }
       
       setTimeout(() => {
         loadVideos();
@@ -691,6 +711,10 @@ document.addEventListener('DOMContentLoaded', async () => {
           svgElement.style.animation = '';
         }
       }, 1000);
+
+      setTimeout(() => {
+        loadVideos();
+      }, 2600);
     } catch (error) {
       console.error('Error scanning:', error);
       if (svgElement) {
@@ -763,8 +787,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   // Listen for download progress
   browser.runtime.onMessage.addListener((message) => {
+    if (message.type === 'DOWNLOAD_STARTED' && message.download) {
+      activeDownloads.set(message.download.url, message.download);
+      renderDownloadsList();
+      updateTabCounts(videosTabCount.textContent, activeDownloads.size);
+      restoreVisibleDownloadStates();
+    }
+
     if (message.type === 'DOWNLOAD_PROGRESS') {
       // Update active downloads
+      if (message.videoUrl && !activeDownloads.has(message.videoUrl) && message.download) {
+        activeDownloads.set(message.videoUrl, message.download);
+        renderDownloadsList();
+      }
+
       if (message.videoUrl && activeDownloads.has(message.videoUrl)) {
         const download = activeDownloads.get(message.videoUrl);
         download.progress = message.progress;
@@ -863,8 +899,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     
     if (message.type === 'DOWNLOAD_CANCELLED') {
-      // Clear all active downloads on cancel
-      activeDownloads.clear();
+      if (Array.isArray(message.activeDownloads)) {
+        syncActiveDownloads(message.activeDownloads);
+      } else if (message.videoUrl) {
+        activeDownloads.delete(message.videoUrl);
+      } else {
+        activeDownloads.clear();
+      }
       renderDownloadsList();
       
       // Reset download buttons
@@ -889,6 +930,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     if (message.type === 'DOWNLOAD_COMPLETE') {
       // Update active downloads
+      if (message.videoUrl && !activeDownloads.has(message.videoUrl) && message.download) {
+        activeDownloads.set(message.videoUrl, message.download);
+      }
+
       if (message.videoUrl && activeDownloads.has(message.videoUrl)) {
         const download = activeDownloads.get(message.videoUrl);
         download.status = message.success ? 'complete' : 'error';
@@ -956,6 +1001,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Event listeners
   scanBtn.addEventListener('click', scanPage);
   clearBtn.addEventListener('click', clearVideos);
+
+  // Brave can keep extension UI alive while focus moves between tabs. Keep the
+  // video list tied to the browser's current active tab.
+  setInterval(async () => {
+    try {
+      const tab = await getCurrentTab();
+      if (tab && currentTabId && tab.id !== currentTabId) {
+        await loadVideos();
+      }
+    } catch (e) {
+      // Ignore transient extension-page tabs or closed windows.
+    }
+  }, 1500);
   
   // Initial load
   loadVideos();

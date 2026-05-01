@@ -17,6 +17,13 @@ let currentDownload = {
 // Track active browser downloads for cancellation
 let activeBrowserDownloadId = null;
 
+// Track active/recent downloads in the background so the popup can be reopened
+// or moved between tabs without losing the current download list.
+const activeDownloads = new Map();
+const browserDownloadUrlsById = new Map();
+const STATE_STORAGE_KEY = 'viddownloader_state_v1';
+let saveStateTimer = null;
+
 // Video file extensions and MIME types (only direct downloadable formats)
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.m4v', '.3gp', '.ogv'];
 const VIDEO_MIME_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo', 'video/x-flv', 'video/x-matroska'];
@@ -32,6 +39,8 @@ const STREAMING_IGNORE_PATTERNS = [
   'googlevideo.com/videoplayback'  // YouTube adaptive streams
 ];
 
+const STREAMING_MANIFEST_PATTERNS = ['.m3u8', '.mpd'];
+
 // URLs to ignore (streaming chunks, tracking, etc.)
 const IGNORE_PATTERNS = [
   '/sq/',                            // YouTube sq segments
@@ -39,6 +48,137 @@ const IGNORE_PATTERNS = [
   '/manifest/', '/playlist/',
   'googlevideo.com'                   // YouTube CDN
 ];
+
+function createDownloadRecord(video, quality = 'best', source = 'companion') {
+  return {
+    url: video.url,
+    title: video.title || video.filename || video.siteName || 'Video',
+    poster: video.poster || '',
+    quality,
+    progress: 0,
+    status: 'downloading',
+    statusText: 'Starting...',
+    timestamp: Date.now(),
+    videoId: video.id || null,
+    source,
+    browserDownloadId: null
+  };
+}
+
+function upsertDownload(video, quality = 'best', source = 'companion', patch = {}) {
+  const existing = activeDownloads.get(video.url) || createDownloadRecord(video, quality, source);
+  const updated = {
+    ...existing,
+    title: existing.title || video.title || video.filename || 'Video',
+    poster: existing.poster || video.poster || '',
+    quality: existing.quality || quality,
+    source: existing.source || source,
+    ...patch
+  };
+  activeDownloads.set(video.url, updated);
+  scheduleStateSave();
+  return updated;
+}
+
+function updateDownloadByUrl(url, patch = {}) {
+  if (!url) return null;
+  const existing = activeDownloads.get(url) || {
+    url,
+    title: 'Video',
+    poster: '',
+    quality: 'best',
+    progress: 0,
+    status: 'downloading',
+    statusText: 'Downloading...',
+    timestamp: Date.now()
+  };
+  const updated = { ...existing, ...patch };
+  activeDownloads.set(url, updated);
+  scheduleStateSave();
+  return updated;
+}
+
+function removeDownloadSoon(url, delay = 5000) {
+  if (!url) return;
+  setTimeout(() => {
+    const download = activeDownloads.get(url);
+    if (download && (download.status === 'complete' || download.status === 'error' || download.status === 'cancelled')) {
+      activeDownloads.delete(url);
+      scheduleStateSave();
+    }
+  }, delay);
+}
+
+function getActiveDownloadList() {
+  return Array.from(activeDownloads.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+}
+
+function getDownloadStatusText(message) {
+  switch (message.status) {
+    case 'starting':
+      return 'Starting download...';
+    case 'extracting':
+      return 'Extracting video info...';
+    case 'extracting playlist':
+      return 'Processing stream playlist...';
+    case 'merging':
+      return 'Merging video and audio...';
+    case 'error':
+      return message.error || 'Download error';
+    default:
+      return `Downloading... ${Math.round(message.progress || 0)}%`;
+  }
+}
+
+function serializeDetectedVideos() {
+  const tabs = {};
+  detectedVideos.forEach((videos, tabId) => {
+    tabs[tabId] = Array.from(videos.values());
+  });
+  return tabs;
+}
+
+function scheduleStateSave() {
+  if (!browser.storage?.local) return;
+  if (saveStateTimer) clearTimeout(saveStateTimer);
+  saveStateTimer = setTimeout(() => {
+    browser.storage.local.set({
+      [STATE_STORAGE_KEY]: {
+        detectedVideos: serializeDetectedVideos(),
+        activeDownloads: getActiveDownloadList(),
+        currentDownload
+      }
+    }).catch(() => {});
+  }, 250);
+}
+
+async function hydrateState() {
+  if (!browser.storage?.local) return;
+
+  try {
+    const data = await browser.storage.local.get(STATE_STORAGE_KEY);
+    const state = data[STATE_STORAGE_KEY];
+    if (!state) return;
+
+    Object.entries(state.detectedVideos || {}).forEach(([tabId, videos]) => {
+      detectedVideos.set(Number(tabId), new Map((videos || []).map(video => [video.url, video])));
+    });
+
+    (state.activeDownloads || []).forEach(download => {
+      if (download && download.url) {
+        activeDownloads.set(download.url, download);
+      }
+    });
+
+    if (state.currentDownload) {
+      currentDownload = state.currentDownload;
+    }
+  } catch (error) {
+    console.warn('[Video Downloader] Could not restore state:', error);
+  }
+}
+
+const stateReady = hydrateState();
 
 // Connect to companion app
 function connectToCompanion() {
@@ -67,6 +207,18 @@ function connectToCompanion() {
         currentDownload.remaining = message.remaining;
         currentDownload.eta = message.eta;
         currentDownload.totalSize = message.totalSize;
+
+        const download = updateDownloadByUrl(currentDownload.videoUrl, {
+          progress: message.progress,
+          status: message.status === 'error' ? 'error' : 'downloading',
+          statusText: getDownloadStatusText(message),
+          speed: message.speed,
+          remaining: message.remaining,
+          downloaded: message.downloaded,
+          totalSize: message.totalSize,
+          eta: message.eta,
+          error: message.error
+        });
         
         // Update badge to show download progress
         updateDownloadBadge(message.progress, message.status);
@@ -82,7 +234,8 @@ function connectToCompanion() {
           totalSize: message.totalSize,
           eta: message.eta,
           videoId: currentDownload.videoId,
-          videoUrl: currentDownload.videoUrl
+          videoUrl: currentDownload.videoUrl,
+          download
         }).catch(() => {});
       }
       
@@ -92,6 +245,13 @@ function connectToCompanion() {
         currentDownload.status = message.success ? 'complete' : 'error';
         currentDownload.progress = message.success ? 100 : 0;
         activeBrowserDownloadId = null;
+
+        const download = updateDownloadByUrl(currentDownload.videoUrl, {
+          status: message.success ? 'complete' : 'error',
+          progress: message.success ? 100 : 0,
+          statusText: message.success ? 'Download complete' : (message.error || 'Download failed'),
+          error: message.error
+        });
         
         // Update badge to show completion status
         updateDownloadBadge(100, message.success ? 'complete' : 'error');
@@ -117,8 +277,11 @@ function connectToCompanion() {
           success: message.success,
           error: message.error,
           videoId: currentDownload.videoId,
-          videoUrl: currentDownload.videoUrl
+          videoUrl: currentDownload.videoUrl,
+          download
         }).catch(() => {});
+
+        removeDownloadSoon(currentDownload.videoUrl);
         
         // Reset download state after a short delay
         setTimeout(() => {
@@ -129,6 +292,7 @@ function connectToCompanion() {
             progress: 0,
             status: 'idle'
           };
+          scheduleStateSave();
         }, 3000);
       }
       
@@ -265,6 +429,8 @@ function initTab(tabId) {
 
 // Check if URL should be ignored
 function shouldIgnoreUrl(url) {
+  if (isStreamingManifestUrl(url)) return false;
+
   const lowerUrl = url.toLowerCase();
   return IGNORE_PATTERNS.some(pattern => lowerUrl.includes(pattern));
 }
@@ -273,6 +439,11 @@ function shouldIgnoreUrl(url) {
 function isStreamingUrl(url) {
   const lowerUrl = url.toLowerCase();
   return STREAMING_IGNORE_PATTERNS.some(pattern => lowerUrl.includes(pattern));
+}
+
+function isStreamingManifestUrl(url) {
+  const lowerUrl = url.toLowerCase();
+  return STREAMING_MANIFEST_PATTERNS.some(pattern => lowerUrl.includes(pattern));
 }
 
 // Check if URL is a directly downloadable video
@@ -373,6 +544,10 @@ function estimateQuality(url, providedQuality = '') {
 
 // Check if URL is from a site that needs companion app
 function needsCompanion(url) {
+  if (isStreamingManifestUrl(url)) {
+    return true;
+  }
+
   const supportedSites = [
     'youtube.com', 'youtu.be',
     'twitter.com', 'x.com',
@@ -393,7 +568,19 @@ function needsCompanion(url) {
     'bandcamp.com',
     'pornhub.com',
     'xvideos.com',
-    'xhamster.com'
+    'xhamster.com',
+    'missav.com', 'missav.live', 'missav.ws', 'missav.ai', 'missav.to',
+    'jable.tv',
+    'javhd.com',
+    'njav.tv',
+    'spankbang.com',
+    'redtube.com',
+    'youporn.com',
+    'tube8.com',
+    'eporner.com',
+    'avgle.com',
+    'javtiful.com',
+    'thisav.com'
   ];
   
   const lowerUrl = url.toLowerCase();
@@ -417,6 +604,7 @@ function addVideo(tabId, videoInfo) {
     });
     
     updateBadge(tabId);
+    scheduleStateSave();
     console.log('[Video Downloader] Detected:', videoInfo.title || videoInfo.url, 'needsCompanion:', requiresCompanion);
   }
 }
@@ -480,9 +668,6 @@ browser.webRequest.onHeadersReceived.addListener(
     if (tabId < 0) return;
     if (shouldIgnoreUrl(url)) return;
     
-    // Skip streaming URLs (HLS/DASH) - they need yt-dlp, not direct download
-    if (isStreamingUrl(url)) return;
-    
     let contentType = '';
     let contentLength = 0;
     
@@ -495,6 +680,30 @@ browser.webRequest.onHeadersReceived.addListener(
         contentLength = parseInt(header.value, 10) || 0;
       }
     }
+
+    // HLS/DASH manifests are not browser-downloadable, but yt-dlp can often use them.
+    const lowerContentType = contentType.toLowerCase();
+    const isManifestResponse = isStreamingManifestUrl(url) ||
+      lowerContentType.includes('mpegurl') ||
+      lowerContentType.includes('dash+xml') ||
+      lowerContentType.includes('vnd.apple.mpegurl');
+
+    if (isManifestResponse) {
+      addVideo(tabId, {
+        url: url,
+        filename: extractFilename(url),
+        contentType: contentType || 'application/vnd.apple.mpegurl',
+        size: contentLength,
+        quality: 'Best Available',
+        source: 'network',
+        needsCompanion: true,
+        pageUrl: details.documentUrl || details.initiator || url
+      });
+      return;
+    }
+
+    // Skip streaming chunks; manifests were handled above.
+    if (isStreamingUrl(url)) return;
     
     // Only detect direct downloadable videos, not streaming
     if (isVideoContentType(contentType) || isVideoUrl(url)) {
@@ -556,21 +765,26 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         siteName: siteName,
         pageUrl: video.pageUrl || video.src  // Keep original page URL for referer
       });
+      sendResponse({ ok: true });
       break;
       
     case 'GET_VIDEOS':
-      initTab(tabId);
-      const videos = Array.from(detectedVideos.get(tabId).values());
-      sendResponse({ 
-        videos: videos,
-        companionReady: companionReady,
-        downloadState: currentDownload
+      stateReady.then(() => {
+        initTab(tabId);
+        const videos = Array.from(detectedVideos.get(tabId).values());
+        sendResponse({ 
+          videos: videos,
+          companionReady: companionReady,
+          downloadState: currentDownload,
+          activeDownloads: getActiveDownloadList()
+        });
       });
-      break;
+      return true;
       
     case 'DOWNLOAD_VIDEO':
       console.log('[Video Downloader] Download request received:', message.video?.url, message.quality);
       downloadVideo(message.video, message.quality);
+      sendResponse({ ok: true });
       break;
       
     case 'GET_VIDEO_INFO':
@@ -582,29 +796,40 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       
     case 'CHECK_COMPANION':
       sendResponse({ ready: companionReady });
-      break;
+      return false;
       
     case 'SCAN_PAGE':
       if (tabId) {
-        browser.tabs.sendMessage(tabId, { type: 'SCAN_PAGE' }).catch(err => {
+        detectedVideos.set(tabId, new Map());
+        updateBadge(tabId);
+        scheduleStateSave();
+        browser.tabs.sendMessage(tabId, { type: 'SCAN_PAGE' }).then(response => {
+          sendResponse({ ok: true, contentScript: response || null });
+        }).catch(err => {
           console.log('[Video Downloader] Could not send SCAN_PAGE to tab:', err.message);
+          sendResponse({ ok: false, error: err.message });
         });
+        return true;
       }
-      break;
+      sendResponse({ ok: false, error: 'No tab id available' });
+      return false;
       
     case 'CLEAR_VIDEOS':
       console.log('[Video Downloader] Clearing videos for tab:', tabId);
       detectedVideos.set(tabId, new Map());
       updateBadge(tabId);
+      scheduleStateSave();
+      sendResponse({ ok: true });
       break;
       
     case 'CANCEL_DOWNLOAD':
       console.log('[Video Downloader] Cancel download requested');
       cancelCurrentDownload();
+      sendResponse({ ok: true });
       break;
   }
   
-  return true;
+  return false;
 });
 
 // Cancel current download
@@ -626,18 +851,31 @@ function cancelCurrentDownload() {
   
   // Reset download state
   const wasActive = currentDownload.active;
-  currentDownload = {
-    active: false,
-    videoId: null,
-    videoUrl: null,
-    progress: 0,
-    status: 'idle'
-  };
+  const cancelledUrl = currentDownload.videoUrl;
+  if (cancelledUrl) {
+    updateDownloadByUrl(cancelledUrl, {
+      active: false,
+      status: 'cancelled',
+      statusText: 'Download cancelled'
+    });
+    removeDownloadSoon(cancelledUrl, 2000);
+  }
+
+    currentDownload = {
+      active: false,
+      videoId: null,
+      videoUrl: null,
+      progress: 0,
+      status: 'idle'
+    };
+    scheduleStateSave();
   
   // Notify popup
   if (wasActive) {
     browser.runtime.sendMessage({
-      type: 'DOWNLOAD_CANCELLED'
+      type: 'DOWNLOAD_CANCELLED',
+      videoUrl: cancelledUrl,
+      activeDownloads: getActiveDownloadList()
     }).catch(() => {});
     
     // Reset badge
@@ -669,6 +907,17 @@ function downloadVideo(video, quality = 'best') {
       progress: 0,
       status: 'downloading'
     };
+    scheduleStateSave();
+
+    const download = upsertDownload(video, quality, 'companion', {
+      progress: 0,
+      status: 'downloading',
+      statusText: 'Starting...'
+    });
+    browser.runtime.sendMessage({
+      type: 'DOWNLOAD_STARTED',
+      download
+    }).catch(() => {});
     
     try {
       // Send download request
@@ -743,8 +992,27 @@ function downloadVideo(video, quality = 'best') {
       progress: 0,
       status: 'downloading'
     };
+    scheduleStateSave();
+
+    browserDownloadUrlsById.set(downloadId, video.url);
+    const download = upsertDownload(video, quality, 'browser', {
+      browserDownloadId: downloadId,
+      progress: 0,
+      status: 'downloading',
+      statusText: 'Browser download started'
+    });
+    browser.runtime.sendMessage({
+      type: 'DOWNLOAD_STARTED',
+      download
+    }).catch(() => {});
   }).catch(error => {
     console.error('[Video Downloader] Browser download failed:', error);
+    updateDownloadByUrl(video.url, {
+      status: 'error',
+      statusText: error.message || 'Browser download failed',
+      error: error.message
+    });
+    removeDownloadSoon(video.url);
     
     browser.notifications.create({
       type: 'basic',
@@ -758,6 +1026,7 @@ function downloadVideo(video, quality = 'best') {
 // Clean up when tab is closed
 browser.tabs.onRemoved.addListener((tabId) => {
   detectedVideos.delete(tabId);
+  scheduleStateSave();
 });
 
 // Clean up when tab navigates to new page
@@ -765,8 +1034,68 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'loading' && changeInfo.url) {
     detectedVideos.set(tabId, new Map());
     updateBadge(tabId);
+    scheduleStateSave();
   }
 });
+
+if (browser.downloads.onChanged) {
+  browser.downloads.onChanged.addListener((delta) => {
+    const url = browserDownloadUrlsById.get(delta.id);
+    if (!url) return;
+
+    if (delta.state && delta.state.current === 'complete') {
+      const download = updateDownloadByUrl(url, {
+        status: 'complete',
+        progress: 100,
+        statusText: 'Download complete'
+      });
+      activeBrowserDownloadId = null;
+      if (currentDownload.videoUrl === url) {
+        currentDownload = {
+          active: false,
+          videoId: currentDownload.videoId,
+          videoUrl: url,
+          progress: 100,
+          status: 'complete'
+        };
+      }
+      browserDownloadUrlsById.delete(delta.id);
+      browser.runtime.sendMessage({
+        type: 'DOWNLOAD_COMPLETE',
+        success: true,
+        videoUrl: url,
+        download
+      }).catch(() => {});
+      removeDownloadSoon(url);
+    }
+
+    if (delta.state && delta.state.current === 'interrupted') {
+      const download = updateDownloadByUrl(url, {
+        status: 'error',
+        statusText: 'Browser download interrupted'
+      });
+      activeBrowserDownloadId = null;
+      if (currentDownload.videoUrl === url) {
+        currentDownload = {
+          active: false,
+          videoId: currentDownload.videoId,
+          videoUrl: url,
+          progress: currentDownload.progress || 0,
+          status: 'error'
+        };
+      }
+      browserDownloadUrlsById.delete(delta.id);
+      browser.runtime.sendMessage({
+        type: 'DOWNLOAD_COMPLETE',
+        success: false,
+        error: 'Browser download interrupted',
+        videoUrl: url,
+        download
+      }).catch(() => {});
+      removeDownloadSoon(url);
+    }
+  });
+}
 
 // Initialize on install
 browser.runtime.onInstalled.addListener(() => {

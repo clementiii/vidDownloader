@@ -1,163 +1,133 @@
-# Video Detector & Downloader - Firefox Extension
+# Video Detector & Downloader
 
-A Firefox extension that detects and downloads videos from any webpage, including **YouTube, Twitter, Instagram, TikTok, Vimeo**, and more!
+A Chromium-compatible browser extension that detects and downloads videos from webpages, including YouTube, X/Twitter, Instagram, TikTok, Vimeo, and more.
 
-Works just like **Video DownloadHelper** with a companion app for full functionality.
+The extension uses a local Python companion app with yt-dlp for sites that cannot be downloaded directly by the browser.
+
+## Supported Browsers
+
+- Google Chrome
+- Microsoft Edge
+- Brave
+- Chromium-based browsers that support Manifest V3 and native messaging
+
+The bundled Chromium extension ID is:
+
+```text
+dhbokoaaoenlmmooohpoacfeaacbkoai
+```
 
 ## Features
 
-- 🎬 **Download from YouTube** - Any quality up to 4K
-- 📺 **Quality Selector** - Choose 1080p, 720p, 480p, etc.
-- 🌐 **200+ Sites Supported** - Via yt-dlp integration
-- 📥 **One-Click Download** - Simple and fast
-- 🔍 **Automatic Detection** - Finds videos on any page
-- 📊 **Progress Tracking** - See download progress in real-time
-- 🎨 **Beautiful Dark UI** - Modern and clean interface
+- Download from YouTube and other yt-dlp supported sites
+- Choose quality where available
+- Detect direct video files from pages and network responses
+- Track download progress in the popup
+- Use browser downloads for direct media URLs
+- Use the companion app for protected and streaming sites
 
 ## Installation
 
-### Step 1: Install the Companion App
+### 1. Install the Companion App
 
-The companion app is required for downloading from YouTube and other protected sites.
+The companion app is required for YouTube and many streaming/protected sites.
 
-1. **Make sure Python is installed**
-   - Download from [python.org](https://www.python.org/downloads/)
-   - ✅ Check "Add Python to PATH" during installation
+1. Make sure Python is installed from <https://www.python.org/downloads/>.
+2. During Python install, enable "Add Python to PATH".
+3. Right-click `companion\install.bat`.
+4. Choose "Run as administrator".
 
-2. **Run the installer**
-   ```
-   Right-click on companion\install.bat → "Run as administrator"
-   ```
-   
-   This will:
-   - Install yt-dlp (the download engine)
-   - Register the companion app with Firefox
+The installer:
 
-### Step 2: Load the Extension
+- Copies the companion app to `C:\viddownloader`
+- Installs or updates `yt-dlp`
+- Registers native messaging for Chrome, Edge, Brave, and Chromium
 
-1. Open Firefox and go to `about:debugging`
-2. Click **"This Firefox"** in the sidebar
-3. Click **"Load Temporary Add-on..."**
-4. Select the `manifest.json` file from this folder
+### 2. Load the Extension in Chromium
 
-### Step 3: Start Downloading!
+1. Open your browser extensions page:
+   - Chrome: `chrome://extensions`
+   - Edge: `edge://extensions`
+   - Brave: `brave://extensions`
+2. Enable "Developer mode".
+3. Click "Load unpacked".
+4. Select this `vidDownloader` folder.
 
-1. Go to any video site (YouTube, Twitter, etc.)
-2. Click the extension icon in the toolbar
-3. Click the green download button
-4. Select your quality
-5. Video downloads to your Downloads folder!
+### 3. Start Downloading
 
-## Supported Sites
-
-The companion app uses **yt-dlp** which supports 1000+ sites including:
-
-| Site | Works |
-|------|-------|
-| YouTube | ✅ All qualities |
-| Twitter/X | ✅ |
-| Instagram | ✅ |
-| TikTok | ✅ |
-| Facebook | ✅ |
-| Vimeo | ✅ |
-| Reddit | ✅ |
-| Twitch | ✅ |
-| Dailymotion | ✅ |
-| And many more... | ✅ |
-
-## Usage
-
-### Popup Interface
-
-- **Green status** = Companion app connected, ready to download
-- **Red status** = Companion app not connected, run install.bat
-
-### Quality Options
-
-When downloading from YouTube/etc, you'll see:
-- **Best Quality** - Highest available (up to 4K)
-- **1080p HD** - Full HD
-- **720p HD** - HD
-- **480p** - Standard
-- **360p** - Low quality
+1. Open a page with a video.
+2. Click the extension icon.
+3. Choose a detected video and quality.
+4. Start the download.
 
 ## Troubleshooting
 
-### "Companion app not connected"
+### Companion app not connected
 
-1. Make sure you ran `install.bat` as Administrator
-2. Make sure Python is installed and in PATH
-3. Restart Firefox after installation
+1. Run `companion\install.bat` as Administrator.
+2. Confirm Python works from a terminal:
+
+```bat
+python --version
+```
+
+3. Confirm yt-dlp is installed:
+
+```bat
+pip show yt-dlp
+```
+
+4. Restart the browser after installing the companion app.
+
+### Extension ID mismatch
+
+The `manifest.json` includes a fixed Chromium key, so the unpacked extension ID should be:
+
+```text
+dhbokoaaoenlmmooohpoacfeaacbkoai
+```
+
+If your browser shows a different extension ID, reload the unpacked extension from this folder and rerun `companion\install.bat`.
 
 ### Downloads fail
 
-1. Check if yt-dlp is installed: `pip show yt-dlp`
-2. Update yt-dlp: `pip install --upgrade yt-dlp`
-3. Some videos may be geo-restricted or private
+Update yt-dlp:
 
-### Testing the companion app
-
-Open Command Prompt and run:
-```bash
-python C:\viddownloader\viddownloader_companion.py
+```bat
+pip install --upgrade yt-dlp
 ```
+
+Some videos may still fail if they are private, geo-restricted, DRM-protected, or blocked by the source site.
 
 ## File Structure
 
-```
+```text
 vidDownloader/
-├── manifest.json           # Extension configuration
-├── background/
-│   └── background.js       # Background script + native messaging
-├── content/
-│   └── content.js          # Video detection on pages
-├── popup/
-│   ├── popup.html          # Popup UI
-│   ├── popup.css           # Styling
-│   └── popup.js            # Popup logic
-├── icons/
-│   └── *.svg               # Extension icons
-├── companion/
-│   ├── install.bat         # Installer (run as admin)
-│   ├── viddownloader_companion.py    # Python companion app
-│   ├── viddownloader_companion.bat   # Launcher script
-│   └── viddownloader.json           # Native messaging manifest
-└── README.md
+  manifest.json
+  background/
+    background.js
+    service_worker.js
+  content/
+    content.js
+  lib/
+    browser-api.js
+  popup/
+    popup.html
+    popup.css
+    popup.js
+  icons/
+    *.svg
+  companion/
+    install.bat
+    viddownloader_companion.py
+    viddownloader_companion.bat
+    viddownloader.json
+    viddownloader.chromium.json
 ```
-
-## How It Works
-
-1. **Extension** detects videos on the page
-2. **Companion App** (Python + yt-dlp) handles the actual download
-3. **Native Messaging** connects Firefox to the companion app
-4. **yt-dlp** does the heavy lifting (decryption, merging, etc.)
 
 ## Requirements
 
-- Firefox 57+
+- Windows 10/11
 - Python 3.7+
-- Windows 10/11 (macOS/Linux support coming soon)
-- ~50MB disk space for yt-dlp
-
-## Privacy
-
-- ❌ No data collection
-- ❌ No external servers
-- ✅ Everything runs locally
-- ✅ Open source
-
-## Credits
-
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) - The download engine
-- Inspired by Video DownloadHelper
-
-## License
-
-MIT License - Free to use and modify.
-
----
-
-**Having issues?** Make sure you:
-1. ✅ Installed Python with "Add to PATH" checked
-2. ✅ Ran install.bat as Administrator
-3. ✅ Restarted Firefox after installation
+- Chromium-based browser with Manifest V3 support
+- yt-dlp, installed by `companion\install.bat`

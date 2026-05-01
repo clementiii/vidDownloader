@@ -1,0 +1,7 @@
+{
+  "name": "viddownloader",
+  "description": "Video Downloader Companion App",
+  "path": "C:\\viddownloader\\viddownloader_companion.bat",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://dhbokoaaoenlmmooohpoacfeaacbkoai/"]
+}

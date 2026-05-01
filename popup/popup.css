@@ -23,8 +23,17 @@
   box-sizing: border-box;
 }
 
+html {
+  width: 500px;
+  min-width: 500px;
+  height: 580px;
+  min-height: 450px;
+  overflow: hidden;
+}
+
 body {
   width: 500px;
+  min-width: 500px;
   min-height: 450px;
   height: 580px;
   font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -37,6 +46,8 @@ body {
 .container {
   display: flex;
   flex-direction: column;
+  width: 500px;
+  min-width: 500px;
   height: 100%;
   min-height: 450px;
 }
@@ -962,10 +973,6 @@ body {
 
 /* Responsive adjustments */
 @media (max-width: 400px) {
-  body {
-    width: 100%;
-  }
-  
   .quality-options {
     grid-template-columns: 1fr;
   }

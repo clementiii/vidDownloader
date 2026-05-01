@@ -1,26 +1,22 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "Video Detector & Downloader",
   "version": "1.0.0",
   "description": "Detects and downloads videos from any webpage",
   "author": "Video Downloader",
   "homepage_url": "https://github.com/video-downloader",
-  
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "viddownloader@example.com",
-      "strict_min_version": "57.0"
-    }
-  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9BwtQEplSkX754WdCWNor67KTji32IGxQzvXLWbXBFPb8FwXxJJA/rZb4oNszL110p70iBAEi5o8ebfcJZfZTgFgwYoaPfVNvHaNkl3SIRJSA5opisfew1VqsRJ0kCOLm313RRINKqaKbW3U8O/HcEY268/Dyy5fz3F3Wys4pN+rQ1XEI6VbXRtv4+AcKBgMuh87izkbU6xJ0Bh5PlHIh9f9u/E+enDCuTKp+SlDjkDyly1P4OOro14ukiTJz8rEHbeSnT2/JuL08ODlEvFRWjbV4cRdUxJOeITnuatNHTHBoDcW9tA+ION9HoL76PRmgTGUceMc2Lz91zsSV2aD/QIDAQAB",
   
   "permissions": [
     "activeTab",
     "downloads",
     "webRequest",
-    "webRequestBlocking",
     "storage",
     "notifications",
-    "nativeMessaging",
+    "nativeMessaging"
+  ],
+
+  "host_permissions": [
     "<all_urls>"
   ],
   
@@ -29,7 +25,7 @@
     "96": "icons/icon-96.svg"
   },
   
-  "browser_action": {
+  "action": {
     "default_icon": {
       "48": "icons/icon-48.svg",
       "96": "icons/icon-96.svg"
@@ -39,19 +35,21 @@
   },
   
   "background": {
-    "scripts": ["background/background.js"],
-    "persistent": true
+    "service_worker": "background/service_worker.js"
   },
   
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content/content.js"],
+      "js": ["lib/browser-api.js", "content/content.js"],
       "run_at": "document_end"
     }
   ],
   
   "web_accessible_resources": [
-    "icons/*"
+    {
+      "resources": ["icons/*"],
+      "matches": ["<all_urls>"]
+    }
   ]
 }
